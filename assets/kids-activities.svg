@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="512" height="512">
+  <rect width="200" height="200" rx="40" fill="#1a1a2e"/>
+  <!-- Star + circles -->
+    <circle cx="100" cy="100" r="58" fill="none" stroke="#f472b6" stroke-width="1" opacity="0.12"/>
+    <polygon points="100,52 112,82 145,82 118,102 128,132 100,114 72,132 82,102 55,82 88,82" fill="none" stroke="#f472b6" stroke-width="4.5" stroke-linejoin="round"/>
+    <circle cx="100" cy="95" r="8" fill="#f472b6"/>
+</svg>
