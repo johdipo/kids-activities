@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "name": "strong_family_nature_event",
+      "input": {
+        "source": "fixture",
+        "title": "Atelier découverte des insectes au bord du lac",
+        "startDate": "2026-05-23T10:00:00+02:00",
+        "locationText": "Yverdon-les-Bains",
+        "description": "Atelier nature pour enfants dès 4 ans avec observation d'insectes et petite balade.",
+        "ageText": "dès 4 ans",
+        "priceText": "CHF 10",
+        "url": "https://example.invalid/insectes-yverdon"
+      },
+      "expected": {
+        "recommendable": true,
+        "primary_tags": ["nature", "animals", "outdoor", "discovery"],
+        "family_fit_reason": "Très bon fit Lennon + Andy: nature, insectes, exploration, âge compatible et proche de Yverdon."
+      }
+    },
+    {
+      "name": "age_mismatch_event",
+      "input": {
+        "source": "fixture",
+        "title": "Stage robotique adolescents",
+        "startDate": "2026-05-24T14:00:00+02:00",
+        "locationText": "Lausanne",
+        "description": "Atelier de programmation pour jeunes de 12 à 16 ans.",
+        "ageText": "12-16 ans",
+        "priceText": "CHF 60",
+        "url": "https://example.invalid/robotique-ados"
+      },
+      "expected": {
+        "recommendable": false,
+        "reject_reason": "Âge incompatible avec Andy et Lennon malgré bon intérêt intellectuel/tech."
+      }
+    },
+    {
+      "name": "navigation_false_positive",
+      "input": {
+        "source": "fixture",
+        "title": "Contact et horaires d'ouverture",
+        "startDate": null,
+        "locationText": "",
+        "description": "Page de contact du site avec formulaire et horaires administratifs.",
+        "ageText": "",
+        "priceText": "",
+        "url": "https://example.invalid/contact"
+      },
+      "expected": {
+        "recommendable": false,
+        "reject_reason": "Pas un événement; doit être filtré comme faux positif de navigation."
+      }
+    },
+    {
+      "name": "daisy_cosy_secondary_option",
+      "input": {
+        "source": "fixture",
+        "title": "Marché artisanal et salon de thé éphémère",
+        "startDate": "2026-05-24T11:00:00+02:00",
+        "locationText": "Grandson",
+        "description": "Créateurs locaux, décoration, petite restauration et coin thé/café.",
+        "ageText": "tout public",
+        "priceText": "entrée libre",
+        "url": "https://example.invalid/marche-artisanal-grandson"
+      },
+      "expected": {
+        "recommendable": true,
+        "primary_tags": ["culture", "cosy", "food", "indoor"],
+        "family_fit_reason": "Bon fit Daisy et sortie douce proche; moins ciblé enfants donc plutôt option secondaire."
+      }
+    }
+  ]
+}
