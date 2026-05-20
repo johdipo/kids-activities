@@ -41,6 +41,12 @@ const SOURCES = {
   }
 };
 
+const TAG_FR = {
+  animals: 'animaux', nature: 'nature', outdoor: 'plein air', walk: 'balade', discovery: 'découverte',
+  culture: 'culture', indoor: 'intérieur', science: 'science', food: 'food/cuisine', cosy: 'cosy',
+  sport: 'sport', water: 'eau', mountain: 'montagne'
+};
+
 function clean(s = '') { return String(s).replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim(); }
 function stripLead(s = '') { return clean(s).replace(/^>\s*/, ''); }
 function sha(s) { return crypto.createHash('sha1').update(s).digest('hex').slice(0, 12); }
@@ -376,7 +382,7 @@ function interestFitDetail(e) {
   score += matched.some(m => m.person === 'Johan') ? 4 : 0;
   if (/bibli|lecture|conte/i.test(e.title + e.description)) score += 4;
   if (/atelier|d[ée]couverte|observation|exp[ée]rience/i.test(e.title + e.description)) score += 3;
-  return { score: Math.min(25, score), matched, reason: matched.length ? matched.map(m => `${m.person}: ${m.tags.join(', ')}`).join(' ; ') : 'peu de signaux d’intérêt familial' };
+  return { score: Math.min(25, score), matched, reason: matched.length ? matched.map(m => `${m.person}: ${m.tags.map(t => TAG_FR[t] || t).join(', ')}`).join(' ; ') : 'peu de signaux d’intérêt familial' };
 }
 
 function confidenceDetail(e) {
@@ -437,15 +443,25 @@ function frDate(iso) {
   const time = iso.includes('T') ? ` à ${iso.slice(11,16).replace(':','h')}` : '';
   return `${d}.${m}.${y}${time}`;
 }
+function frWindow(window) {
+  const end = new Date(`${window.endExclusive}T12:00:00Z`);
+  end.setUTCDate(end.getUTCDate() - 1);
+  return `${frDate(window.start).replace(/\.2026$/, '')}–${frDate(end.toISOString().slice(0, 10))}`;
+}
+function practicalCaveat(caveats = []) {
+  if (!caveats.length) return 'détails pratiques à vérifier';
+  return caveats.slice(0, 2).join(' ; ');
+}
 function telegramSummary(scored, window) {
-  const top = scored.filter(x => x.score.total >= 60).slice(0, 7);
-  if (!top.length) return `Activités famille — week-end ${window.start} → ${window.endExclusive}\n\nAucune recommandation fiable: les sources ont été collectées, mais rien ne passe les filtres date/lieu/qualité.`;
-  return [`Activités famille — idées sourcées pour ce week-end`, `Fenêtre: ${window.start} → ${window.endExclusive}`, ''].concat(top.map(({event:e, score}, i) =>
+  const top = scored.filter(x => x.score.total >= 60).slice(0, 5);
+  if (!top.length) return `Idées famille pour ce week-end — ${frWindow(window)}\n\nAucune recommandation fiable: les sources ont été collectées, mais rien ne passe les filtres date/lieu/qualité.`;
+  const lines = [`Idées famille pour ce week-end — ${frWindow(window)}`, `Sélection sourcée autour d’Yverdon, à vérifier avant de partir.`];
+  return lines.concat(top.map(({event:e, score}, i) =>
     `${i+1}. ${e.title}\n` +
     `📅 ${frDate(e.startDate)}\n` +
     `📍 ${e.locationText || e.city}\n` +
-    `Pourquoi: ${(score.reasons && score.reasons.length) ? score.reasons.join(' · ') : fitReason(e)} (${score.total}/100, ${score.label})\n` +
-    `À vérifier: ${(score.caveats && score.caveats.length) ? score.caveats.join(' ; ') : caveat(e)}\n` +
+    `Pourquoi: ${(score.reasons && score.reasons.length) ? score.reasons.join(' · ') : fitReason(e)}. Score ${score.total}/100 — ${score.label}.\n` +
+    `À vérifier: ${practicalCaveat(score.caveats && score.caveats.length ? score.caveats : [caveat(e)])}\n` +
     `${e.url}`
   )).join('\n\n');
 }
