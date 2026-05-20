@@ -12,6 +12,9 @@ Thumbs.db
 # Node
 node_modules/
 
+# Generated run artifacts
+automation/out/
+
 # Sensitive
 .env
 *.env
