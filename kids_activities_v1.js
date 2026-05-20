@@ -7,6 +7,29 @@ const assert = require('assert');
 const cheerio = require('cheerio');
 
 const TZ = 'Europe/Zurich';
+const FAMILY = {
+  andy: { name: 'Andy', age: 6, tags: ['science', 'culture', 'sport', 'water', 'food', 'indoor', 'discovery'] },
+  lennon: { name: 'Lennon', age: 4, tags: ['animals', 'nature', 'outdoor', 'discovery'] },
+  johan: { name: 'Johan', tags: ['sport', 'outdoor', 'mountain', 'nature', 'science', 'culture', 'food'] },
+  daisy: { name: 'Daisy', tags: ['walk', 'mountain', 'cosy', 'culture', 'indoor', 'food'] }
+};
+const LOCATION_KM_FROM_YVERDON = {
+  'yverdon-les-bains': 0,
+  yverdon: 0,
+  grandson: 5,
+  concise: 13,
+  yvonand: 10,
+  orbe: 12,
+  'sainte-croix': 23,
+  lausanne: 39,
+  morat: 38,
+  morges: 48,
+  neuchatel: 39,
+  neuchâtel: 39,
+  fribourg: 55,
+  geneve: 85,
+  genève: 85
+};
 const SOURCES = {
   grandson: {
     url: 'https://www.grandson.ch/vie-locale/agenda-des-manifestations/',
@@ -108,6 +131,9 @@ function inferTags(text) {
   addIf('food', /food|go[ûu]ter|cuisine|march[ée]|terroir|caf[ée]|th[ée]|salon de th[ée]/);
   addIf('cosy', /cosy|caf[ée]|th[ée]|salon de th[ée]|doux|artisan|d[ée]coration/);
   addIf('sport', /sport|bouge|course|grimpe|escalade|tennis|gym|danse/);
+  addIf('water', /\b(eau|lac|piscine|baignade|aquatique|bateau|nautique)\b/);
+  addIf('walk', /balade|marche|sentier|visite|promenade|parcours/);
+  addIf('mountain', /montagne|alpage|sommet|jura|sainte-croix/);
   addIf('indoor', /bibli|th[ée][âa]tre|expo|salle|mus[ée]e|op[ée]ra|salon de th[ée]/);
   addIf('discovery', /d[ée]couverte|visite|exploration|parcours|atelier/);
   return [...tags];
@@ -246,31 +272,132 @@ async function scrapeYverdon() {
 function rejectionReason(e, window) {
   if (!e.url) return 'missing_url';
   if (!e.title || /contact|horaires d'ouverture|agenda des manifestations|accueil/i.test(e.title)) return 'navigation_or_empty_title';
+  if (looksLikeNonEvent(e)) return 'non_event_or_administrative';
   if (!e.startDate) return 'missing_date';
   const date = e.startDate.slice(0,10);
-  if (date < window.start || date >= window.endExclusive) return `outside_window_${window.start}_${window.endExclusive}`;
+  const end = (e.endDate || e.startDate).slice(0,10);
+  if (end < window.start || date >= window.endExclusive) return `outside_window_${window.start}_${window.endExclusive}`;
   if (!e.locationText && !e.city) return 'missing_location';
+  const distance = estimateDistanceKm(e);
+  if (distance != null && distance > 60) return `too_far_${distance}km`;
   if (/caves? ouvertes?|vin|vigneron|d[ée]gustation/i.test(`${e.title} ${e.description}`)) return 'adult_or_alcohol_focused';
-  const ageBad = (min, max) => (min && min > 6) || (max && max < 4);
-  if (ageBad(e.ageMin, e.ageMax)) return 'age_mismatch';
+  const age = ageFitDetail(e);
+  if (!age.andy.compatible || !age.lennon.compatible) return 'age_mismatch';
   return null;
 }
 
 function scoreEvent(e, window) {
-  const andy = ageScore(e, 6), lennon = ageScore(e, 4);
-  const dateScore = !rejectionReason({...e, locationText: e.locationText || e.city}, window) ? 20 : (e.startDate ? 8 : 0);
-  const locationScore = /yverdon|grandson/i.test(`${e.city} ${e.locationText}`) ? 18 : 10;
-  const interestTags = new Set(['nature','animals','outdoor','discovery','science','culture','sport','food','cosy','indoor']);
-  const interest = Math.min(24, e.tags.filter(t => interestTags.has(t)).length * 6 + (/bibli|lecture|conte/i.test(e.title + e.description) ? 6 : 0));
-  const confidence = (e.url ? 5 : 0) + (e.startDate ? 5 : 0) + (e.locationText || e.city ? 5 : 0) + (e.description ? 5 : 0);
-  const total = Math.min(100, andy + lennon + dateScore + locationScore + interest + confidence);
-  return { total, components: { ageFitAndy: andy, ageFitLennon: lennon, dateWeekendFit: dateScore, locationTravelBurden: locationScore, interestFit: interest, practicalConfidence: confidence }, label: total >= 70 ? 'recommandé' : 'option secondaire' };
+  const age = ageFitDetail(e);
+  const date = dateFitDetail(e, window);
+  const location = locationFitDetail(e);
+  const interest = interestFitDetail(e);
+  const confidence = confidenceDetail(e);
+  const total = Math.min(100, age.andy.score + age.lennon.score + date.score + location.score + interest.score + confidence.score);
+  const childCentric = hasChildCentricSignal(e);
+  return {
+    total,
+    components: {
+      ageFitAndy: age.andy.score,
+      ageFitLennon: age.lennon.score,
+      dateWeekendFit: date.score,
+      locationTravelBurden: location.score,
+      interestFit: interest.score,
+      practicalConfidence: confidence.score
+    },
+    details: { age, date, location, interest, confidence },
+    reasons: buildFitReasons(e, { age, date, location, interest, confidence }),
+    caveats: buildCaveats(e, { age, date, location, interest, confidence }),
+    label: total >= 70 && childCentric ? 'recommandé' : 'option secondaire'
+  };
 }
-function ageScore(e, age) {
-  if (e.ageMin == null && e.ageMax == null) return 8;
-  if (e.ageMin != null && age < e.ageMin) return 0;
-  if (e.ageMax != null && age > e.ageMax) return 0;
-  return 10;
+
+function hasChildCentricSignal(e) {
+  const tags = new Set(e.tags || []);
+  if (['nature', 'animals', 'discovery', 'science', 'sport', 'water'].some(t => tags.has(t))) return true;
+  return /enfants?|famille|atelier|conte|jeu|lecture|bibli|d[ée]couverte|exploration|observation/i.test(`${e.title} ${e.description} ${e.ageText}`);
+}
+
+function looksLikeNonEvent(e) {
+  const text = `${e.title} ${e.description}`.toLowerCase();
+  return /formulaire|page de contact|horaires administratifs|newsletter|politique de confidentialit[ée]|conditions g[ée]n[ée]rales/.test(text);
+}
+
+function ageFitDetail(e) {
+  const child = (age) => {
+    if (e.ageMin == null && e.ageMax == null) return { compatible: true, score: 8, reason: 'âge non précisé, probablement familial à vérifier' };
+    if (e.ageMin != null && age < e.ageMin) return { compatible: false, score: 0, reason: `âge minimum ${e.ageMin} ans` };
+    if (e.ageMax != null && age > e.ageMax) return { compatible: false, score: 0, reason: `âge maximum ${e.ageMax} ans` };
+    return { compatible: true, score: 10, reason: e.ageText || 'âge compatible' };
+  };
+  return { andy: child(FAMILY.andy.age), lennon: child(FAMILY.lennon.age), ageText: e.ageText || '' };
+}
+
+function dateFitDetail(e, window) {
+  if (!e.startDate) return { score: 0, reason: 'date manquante' };
+  const start = e.startDate.slice(0,10);
+  const end = (e.endDate || e.startDate).slice(0,10);
+  const overlaps = end >= window.start && start < window.endExclusive;
+  if (!overlaps) return { score: 0, reason: `hors fenêtre ${window.start} → ${window.endExclusive}` };
+  const day = new Date(`${start}T12:00:00Z`).getUTCDay();
+  const weekendBonus = day === 0 || day === 6 ? 20 : 14;
+  return { score: weekendBonus, reason: day === 0 || day === 6 ? 'tombe le week-end ciblé' : 'recouvre la fenêtre ciblée' };
+}
+
+function estimateDistanceKm(e) {
+  const hay = clean(`${e.city || ''} ${e.locationText || ''}`).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  for (const [city, km] of Object.entries(LOCATION_KM_FROM_YVERDON)) {
+    const key = city.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    if (hay.includes(key)) return km;
+  }
+  if (/yverdon|grandson/i.test(hay)) return /grandson/i.test(hay) ? 5 : 0;
+  return null;
+}
+
+function locationFitDetail(e) {
+  const km = estimateDistanceKm(e);
+  if (km == null) return { score: 10, distanceKm: null, reason: 'distance inconnue, lieu à vérifier' };
+  if (km <= 8) return { score: 20, distanceKm: km, reason: 'très proche d’Yverdon' };
+  if (km <= 25) return { score: 16, distanceKm: km, reason: 'trajet court en famille' };
+  if (km <= 45) return { score: 11, distanceKm: km, reason: 'day-trip raisonnable mais trajet notable' };
+  return { score: 5, distanceKm: km, reason: 'trajet lourd pour une sortie enfants' };
+}
+
+function interestFitDetail(e) {
+  const tags = new Set(e.tags || []);
+  const matched = [];
+  let score = 0;
+  for (const person of [FAMILY.lennon, FAMILY.andy, FAMILY.daisy, FAMILY.johan]) {
+    const hits = person.tags.filter(t => tags.has(t));
+    if (hits.length) matched.push({ person: person.name, tags: hits.slice(0, 3) });
+  }
+  score += matched.some(m => m.person === 'Lennon') ? 8 : 0;
+  score += matched.some(m => m.person === 'Andy') ? 7 : 0;
+  score += matched.some(m => m.person === 'Daisy') ? 4 : 0;
+  score += matched.some(m => m.person === 'Johan') ? 4 : 0;
+  if (/bibli|lecture|conte/i.test(e.title + e.description)) score += 4;
+  if (/atelier|d[ée]couverte|observation|exp[ée]rience/i.test(e.title + e.description)) score += 3;
+  return { score: Math.min(25, score), matched, reason: matched.length ? matched.map(m => `${m.person}: ${m.tags.join(', ')}`).join(' ; ') : 'peu de signaux d’intérêt familial' };
+}
+
+function confidenceDetail(e) {
+  const bits = [e.url && 'URL', e.startDate && 'date', (e.locationText || e.city) && 'lieu', e.description && 'description', e.priceText && 'prix'].filter(Boolean);
+  return { score: Math.min(15, bits.length * 3), evidence: bits, reason: bits.length ? `infos présentes: ${bits.join(', ')}` : 'détails pratiques pauvres' };
+}
+
+function buildFitReasons(e, d) {
+  return [d.interest.reason, d.location.reason, d.date.reason]
+    .filter(Boolean)
+    .slice(0, 3);
+}
+
+function buildCaveats(e, d) {
+  const out = [];
+  if (!e.priceText) out.push('prix à vérifier');
+  if (!e.ageText) out.push('âge non précisé');
+  if (d.location.distanceKm != null && d.location.distanceKm > 35) out.push(`trajet env. ${d.location.distanceKm} km`);
+  if (/inscription|r[ée]servation/i.test(e.evidence)) out.push('inscription/réservation à vérifier');
+  if (!out.length) out.push(e.priceText || 'détails pratiques à vérifier');
+  return out;
 }
 
 function inspectQuality(events, accepted, rejected, sourceLogs) {
@@ -317,8 +444,8 @@ function telegramSummary(scored, window) {
     `${i+1}. ${e.title}\n` +
     `📅 ${frDate(e.startDate)}\n` +
     `📍 ${e.locationText || e.city}\n` +
-    `Pourquoi: ${fitReason(e)} (${score.total}/100, ${score.label})\n` +
-    `À vérifier: ${caveat(e)}\n` +
+    `Pourquoi: ${(score.reasons && score.reasons.length) ? score.reasons.join(' · ') : fitReason(e)} (${score.total}/100, ${score.label})\n` +
+    `À vérifier: ${(score.caveats && score.caveats.length) ? score.caveats.join(' ; ') : caveat(e)}\n` +
     `${e.url}`
   )).join('\n\n');
 }
@@ -350,7 +477,14 @@ function runFixtureTests() {
     const scored = scoreEvent(e, window);
     if (f.expected.recommendable) assert(!reason && scored.total >= 60, `${f.name} should be recommendable: ${reason} ${scored.total}`);
     else assert(reason || scored.total < 60, `${f.name} should be rejected/low score`);
+    if (f.expected.reject_reason) assert(reason, `${f.name} expected a rejection reason`);
     if (f.expected.primary_tags) for (const tag of f.expected.primary_tags) assert(e.tags.includes(tag), `${f.name} missing tag ${tag}; got ${e.tags}`);
+    assert(typeof scored.components.ageFitAndy === 'number', `${f.name} missing Andy age component`);
+    assert(typeof scored.components.ageFitLennon === 'number', `${f.name} missing Lennon age component`);
+    assert(scored.details && scored.reasons && scored.caveats, `${f.name} missing transparent scoring details`);
+    if (f.name === 'daisy_cosy_secondary_option') assert.strictEqual(scored.label, 'option secondaire');
+    if (f.name === 'age_mismatch_event') assert.strictEqual(reason, 'age_mismatch');
+    if (f.name === 'navigation_false_positive') assert(/navigation|non_event|missing_date/.test(reason), `${f.name} wrong rejection reason ${reason}`);
   }
   assert.strictEqual(parseFrenchDate('SAMEDI 23 mai 2026'), '2026-05-23');
   assert.strictEqual(parseFrenchDate('MARDI 05 MAI 2026'), '2026-05-05');
