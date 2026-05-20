@@ -38,6 +38,10 @@ const SOURCES = {
   yverdon: {
     url: 'https://yverdonlesbainsregion.ch/agenda/',
     kind: 'tourism-agenda'
+  },
+  infomaniakYverdon: {
+    url: 'https://infomaniak.events/fr-ch/yverdon-les-bains',
+    kind: 'ticketing-agenda'
   }
 };
 
@@ -101,6 +105,21 @@ function isoDate(date, timeText = '') {
   return time ? `${date}T${time}` : date;
 }
 
+function parseInfomaniakDateRange(text, fallbackYear = new Date().getFullYear()) {
+  const t = clean(text).toLowerCase();
+  const range = t.match(/du\s+(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)?\s*(\d{1,2})\s*(janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)?\s+au\s+(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)?\s*(\d{1,2})\s+(janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)(?:\s+(\d{4}))?/i);
+  if (range) {
+    const year = range[5] || String(fallbackYear);
+    const startMonth = MONTHS[range[2] || range[4]];
+    const endMonth = MONTHS[range[4]];
+    const startDate = isoDate(`${year}-${startMonth}-${range[1].padStart(2, '0')}`, text);
+    const endDate = `${year}-${endMonth}-${range[3].padStart(2, '0')}`;
+    return { startDate, endDate };
+  }
+  const single = parseFrenchDate(t, fallbackYear);
+  return { startDate: isoDate(single, text), endDate: null };
+}
+
 function nextWeekendWindow(now = new Date()) {
   // Use local-ish UTC math; sufficient for date filtering artifacts. Current cron provides UTC, output labels Zurich.
   const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -133,15 +152,15 @@ function inferTags(text) {
   addIf('animals', /insect|hirondelle|nichoir|animaux|faune|oiseaux|cheval|poney/);
   addIf('outdoor', /plein air|balade|visite|sentier|lac|parcours|coteau|jardin|sport|bouge/);
   addIf('culture', /mus[ée]e|th[ée][âa]tre|conte|lecture|bibli|expo|op[ée]ra|spectacle|historique|artisan|march[ée]/);
-  addIf('science', /science|robot|tech|atelier|d[ée]couverte|exp[ée]rience/);
-  addIf('food', /food|go[ûu]ter|cuisine|march[ée]|terroir|caf[ée]|th[ée]|salon de th[ée]/);
-  addIf('cosy', /cosy|caf[ée]|th[ée]|salon de th[ée]|doux|artisan|d[ée]coration/);
+  addIf('science', /science|robot|tech|atelier|exp[ée]rience scientifique/);
+  addIf('food', /food|go[ûu]ter|cuisine|march[ée]|terroir|\bcaf[ée]\b|\bth[ée]\b|salon de th[ée]/);
+  addIf('cosy', /cosy|\bcaf[ée]\b|\bth[ée]\b|salon de th[ée]|doux|artisan|d[ée]coration/);
   addIf('sport', /sport|bouge|course|grimpe|escalade|tennis|gym|danse/);
   addIf('water', /\b(eau|lac|piscine|baignade|aquatique|bateau|nautique)\b/);
   addIf('walk', /balade|marche|sentier|visite|promenade|parcours/);
   addIf('mountain', /montagne|alpage|sommet|jura|sainte-croix/);
   addIf('indoor', /bibli|th[ée][âa]tre|expo|salle|mus[ée]e|op[ée]ra|salon de th[ée]/);
-  addIf('discovery', /d[ée]couverte|visite|exploration|parcours|atelier/);
+  addIf('discovery', /d[ée]couverte|exploration|observation|parcours|atelier/);
   return [...tags];
 }
 
@@ -256,7 +275,7 @@ function parseYverdonListing(parentText, anchorText, url) {
 
 async function scrapeYverdon() {
   const source = 'yverdon';
-  const html = await fetchHtml(SOURCES.yverdon.url, 20000);
+  const html = await fetchHtml(SOURCES.yverdon.url, 35000);
   const $ = cheerio.load(html);
   const links = uniqBy($('a[href*="/evenement/"]').map((_, a) => {
     const anchorText = stripLead($(a).text());
@@ -275,6 +294,46 @@ async function scrapeYverdon() {
   return events.filter(e => !e.error);
 }
 
+function parseInfomaniakListing(text, url) {
+  const evidence = clean(text);
+  const prefixes = /^(Bientôt complet|Dernière chance|Nouveau|Complet)\s+/i;
+  const stripped = evidence.replace(prefixes, '');
+  const dateMatch = stripped.match(/(?:Du\s+)?(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\s+\d{1,2}\s+(?:au\s+(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\s+\d{1,2}\s+)?(?:janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)(?:\s+-\s+\d{1,2}h\d{0,2})?/i);
+  const dateText = dateMatch ? dateMatch[0] : '';
+  const title = clean(dateMatch ? stripped.slice(0, dateMatch.index) : stripped.split(/\s+A partir de\s+/i)[0]).slice(0, 140);
+  const afterDate = dateMatch ? stripped.slice(dateMatch.index + dateText.length) : stripped;
+  const priceMatch = afterDate.match(/A partir de\s+[^.]+\.-/i);
+  const locationText = clean(priceMatch ? afterDate.slice(0, priceMatch.index) : '').replace(/^[-–]\s*/, '');
+  const priceText = priceMatch ? clean(priceMatch[0]) : '';
+  const description = clean(priceMatch ? afterDate.slice(priceMatch.index + priceText.length) : afterDate).replace(/^(Famille|Théâtre et arts vivants|Musique|Spectacle)\s*$/i, '');
+  const dates = parseInfomaniakDateRange(dateText, 2026);
+  const city = cityFromLocation(locationText, 'Yverdon-les-Bains');
+  return normalizeEvent({
+    source: 'infomaniak-yverdon', title, startDate: dates.startDate, endDate: dates.endDate,
+    locationName: locationText.split(/\s+-\s+/)[0], locationText, city, url,
+    description, priceText, evidence
+  });
+}
+
+async function scrapeInfomaniakYverdon() {
+  const source = 'infomaniak-yverdon';
+  const html = await fetchHtml(SOURCES.infomaniakYverdon.url, 20000);
+  const $ = cheerio.load(html);
+  const links = uniqBy($('a[href*="/events/"]').map((_, a) => ({
+    text: stripLead($(a).text()), url: canonicalUrl($(a).attr('href'), SOURCES.infomaniakYverdon.url)
+  })).get().filter(x => x.url && x.text && /\b(janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)\b/i.test(x.text)), x => x.url).slice(0, 60);
+
+  const events = [];
+  for (const link of links) {
+    try {
+      events.push(parseInfomaniakListing(link.text, link.url));
+    } catch (e) {
+      events.push({ source, title: link.text, url: link.url, error: e.message });
+    }
+  }
+  return events.filter(e => !e.error);
+}
+
 function rejectionReason(e, window) {
   if (!e.url) return 'missing_url';
   if (!e.title || /contact|horaires d'ouverture|agenda des manifestations|accueil/i.test(e.title)) return 'navigation_or_empty_title';
@@ -287,6 +346,8 @@ function rejectionReason(e, window) {
   const distance = estimateDistanceKm(e);
   if (distance != null && distance > 60) return `too_far_${distance}km`;
   if (/caves? ouvertes?|vin|vigneron|d[ée]gustation/i.test(`${e.title} ${e.description}`)) return 'adult_or_alcohol_focused';
+  if (isLateAdultLeaningEvent(e)) return 'late_evening_not_family';
+  if (isVagueLongRunningNonFamilyEvent(e)) return 'too_vague_not_family_enough';
   const age = ageFitDetail(e);
   if (!age.andy.compatible || !age.lennon.compatible) return 'age_mismatch';
   return null;
@@ -318,9 +379,30 @@ function scoreEvent(e, window) {
 }
 
 function hasChildCentricSignal(e) {
+  const text = `${e.title} ${e.description} ${e.ageText}`;
   const tags = new Set(e.tags || []);
-  if (['nature', 'animals', 'discovery', 'science', 'sport', 'water'].some(t => tags.has(t))) return true;
-  return /enfants?|famille|atelier|conte|jeu|lecture|bibli|d[ée]couverte|exploration|observation/i.test(`${e.title} ${e.description} ${e.ageText}`);
+  if (/enfants?|famille|kids?|atelier|conte|\bjeux?\b|lecture|bibli|d[ée]couverte|exploration|observation/i.test(text)) return true;
+  if (['nature', 'animals', 'science', 'water'].some(t => tags.has(t))) return true;
+  return false;
+}
+
+function eventStartHour(e) {
+  const m = String(e.startDate || '').match(/T(\d{2}):/);
+  return m ? Number(m[1]) : null;
+}
+
+function isLateAdultLeaningEvent(e) {
+  const hour = eventStartHour(e);
+  if (hour == null || hour < 20) return false;
+  return !hasChildCentricSignal(e);
+}
+
+function isVagueLongRunningNonFamilyEvent(e) {
+  if (!e.endDate || hasChildCentricSignal(e)) return false;
+  const start = Date.parse(`${String(e.startDate).slice(0, 10)}T12:00:00Z`);
+  const end = Date.parse(`${String(e.endDate).slice(0, 10)}T12:00:00Z`);
+  const days = Number.isFinite(start) && Number.isFinite(end) ? Math.round((end - start) / 86400000) : 0;
+  return days >= 7 && !/enfants?|famille|kids?/i.test(`${e.title} ${e.description} ${e.ageText}`);
 }
 
 function looksLikeNonEvent(e) {
@@ -453,7 +535,8 @@ function practicalCaveat(caveats = []) {
   return caveats.slice(0, 2).join(' ; ');
 }
 function telegramSummary(scored, window) {
-  const top = scored.filter(x => x.score.total >= 60).slice(0, 5);
+  const candidates = scored.filter(x => x.score.total >= 60);
+  const top = candidates.filter(x => x.score.label === 'recommandé').concat(candidates.filter(x => x.score.label !== 'recommandé')).slice(0, 5);
   if (!top.length) return `Idées famille pour ce week-end — ${frWindow(window)}\n\nAucune recommandation fiable: les sources ont été collectées, mais rien ne passe les filtres date/lieu/qualité.`;
   const lines = [`Idées famille pour ce week-end — ${frWindow(window)}`, `Sélection sourcée autour d’Yverdon, à vérifier avant de partir.`];
   return lines.concat(top.map(({event:e, score}, i) =>
@@ -469,7 +552,7 @@ function telegramSummary(scored, window) {
 async function collectAll() {
   const sourceLogs = [];
   const out = [];
-  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon })) {
+  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon })) {
     const started = new Date().toISOString();
     try {
       const items = await fn();
@@ -504,6 +587,8 @@ function runFixtureTests() {
   }
   assert.strictEqual(parseFrenchDate('SAMEDI 23 mai 2026'), '2026-05-23');
   assert.strictEqual(parseFrenchDate('MARDI 05 MAI 2026'), '2026-05-05');
+  assert.deepStrictEqual(parseInfomaniakDateRange('Du vendredi 22 au samedi 23 mai', 2026), { startDate: '2026-05-22', endDate: '2026-05-23' });
+  assert.strictEqual(parseInfomaniakDateRange('Dimanche 24 mai - 13h30', 2026).startDate, '2026-05-24T13:30:00+02:00');
   console.log(`[TEST] fixture/date tests passed (${fixtures.length} fixtures)`);
 }
 
@@ -544,4 +629,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, scrapeGrandson, scrapeYverdon };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon };
