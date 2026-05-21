@@ -534,11 +534,19 @@ function practicalCaveat(caveats = []) {
   if (!caveats.length) return 'détails pratiques à vérifier';
   return caveats.slice(0, 2).join(' ; ');
 }
-function telegramSummary(scored, window) {
+function shortlistedRecommendations(scored) {
   const candidates = scored.filter(x => x.score.total >= 60);
-  const top = candidates.filter(x => x.score.label === 'recommandé').concat(candidates.filter(x => x.score.label !== 'recommandé')).slice(0, 5);
+  return candidates.filter(x => x.score.label === 'recommandé').concat(candidates.filter(x => x.score.label !== 'recommandé')).slice(0, 5);
+}
+
+function telegramSummary(scored, window) {
+  const top = shortlistedRecommendations(scored);
   if (!top.length) return `Idées famille pour ce week-end — ${frWindow(window)}\n\nAucune recommandation fiable: les sources ont été collectées, mais rien ne passe les filtres date/lieu/qualité.`;
-  const lines = [`Idées famille pour ce week-end — ${frWindow(window)}`, `Sélection sourcée autour d’Yverdon, à vérifier avant de partir.`];
+  const lines = [
+    `BROUILLON NON VALIDÉ — reviews dédiées par événement requises avant envoi`,
+    `Idées famille pour ce week-end — ${frWindow(window)}`,
+    `Sélection sourcée autour d’Yverdon, à vérifier avant de partir.`
+  ];
   return lines.concat(top.map(({event:e, score}, i) =>
     `${i+1}. ${e.title}\n` +
     `📅 ${frDate(e.startDate)}\n` +
@@ -547,6 +555,42 @@ function telegramSummary(scored, window) {
     `À vérifier: ${practicalCaveat(score.caveats && score.caveats.length ? score.caveats : [caveat(e)])}\n` +
     `${e.url}`
   )).join('\n\n');
+}
+
+function eventReviewQueue(scored, window) {
+  const top = shortlistedRecommendations(scored);
+  return {
+    status: top.length ? 'reviews_required_before_send' : 'no_recommendations',
+    instruction: 'Open one isolated subagent/session per shortlisted event. Each must open/read the canonical event page, verify practical facts, challenge ranking, and write event-reviews/<event-id>.md before any final Telegram summary is sent.',
+    window,
+    count: top.length,
+    events: top.map(({ event, score }) => ({
+      id: event.id,
+      title: event.title,
+      url: event.url,
+      startDate: event.startDate,
+      location: event.locationText || event.city || event.locationName,
+      source: event.source,
+      score: score.total,
+      label: score.label,
+      reasons: score.reasons || [],
+      caveats: score.caveats || []
+    }))
+  };
+}
+
+function eventReviewQueueMarkdown(queue) {
+  if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
+  return '# Event review queue — mandatory before final send\n\n'
+    + 'Run one dedicated isolated session per event. The final Telegram summary must not be sent from `telegram-summary.txt`; it is only a draft until these reviews exist and are consolidated.\n\n'
+    + queue.events.map((e, i) => `${i+1}. **${e.title}**\n`
+      + `   - id: \`${e.id}\`\n`
+      + `   - url: ${e.url}\n`
+      + `   - date: ${e.startDate || 'à vérifier'}\n`
+      + `   - place: ${e.location || 'à vérifier'}\n`
+      + `   - scraper score: ${e.score}/100 — ${e.label}\n`
+      + `   - caveats: ${(e.caveats || []).join('; ') || 'aucun'}\n`
+      + `   - artifact required: \`event-reviews/${e.id}.md\`\n`).join('\n');
 }
 
 async function collectAll() {
@@ -608,25 +652,30 @@ async function main() {
   const scored = accepted.map(event => ({ event, score: scoreEvent(event, window) })).sort((a,b) => b.score.total - a.score.total);
   const quality = inspectQuality(normalized, accepted, rejected, sourceLogs);
   const summary = telegramSummary(scored, window);
+  const reviewQueue = eventReviewQueue(scored, window);
 
   const now = new Date().toISOString().replace(/[:.]/g, '-');
   const outDir = path.join(process.cwd(), 'automation', 'out', `v02-${now}`);
   fs.mkdirSync(outDir, { recursive: true });
+  fs.mkdirSync(path.join(outDir, 'event-reviews'), { recursive: true });
   fs.writeFileSync(path.join(outDir, 'fetch-log.json'), JSON.stringify(sourceLogs, null, 2));
   fs.writeFileSync(path.join(outDir, 'normalized-events.json'), JSON.stringify({ generatedAt: new Date().toISOString(), window, count: normalized.length, events: normalized }, null, 2));
   fs.writeFileSync(path.join(outDir, 'quality-inspection.json'), JSON.stringify(quality, null, 2));
   fs.writeFileSync(path.join(outDir, 'scored-events.json'), JSON.stringify({ window, count: scored.length, scored }, null, 2));
+  fs.writeFileSync(path.join(outDir, 'event-review-queue.json'), JSON.stringify(reviewQueue, null, 2));
+  fs.writeFileSync(path.join(outDir, 'event-reviews', 'TODO.md'), eventReviewQueueMarkdown(reviewQueue));
   fs.writeFileSync(path.join(outDir, 'telegram-summary.txt'), summary + '\n');
   fs.writeFileSync(path.join(outDir, 'errors.log'), sourceLogs.filter(s => s.status === 'error').map(s => `${s.source}: ${s.error}`).join('\n'));
 
   console.log(`Saved artifacts: ${outDir}`);
   console.log(`Raw=${quality.counts.raw} Accepted=${quality.counts.accepted} Rejected=${quality.counts.rejected} Duplicates=${quality.counts.duplicates}`);
   console.log(`Quality: dates=${quality.acceptedQuality.withDatePct}% locations=${quality.acceptedQuality.withLocationPct}% urls=${quality.acceptedQuality.withUrlPct}%`);
-  console.log('\n--- Telegram summary preview ---\n' + summary);
+  console.log(`Dedicated reviews required before send: ${reviewQueue.count} event(s). See ${path.join(outDir, 'event-reviews', 'TODO.md')}`);
+  console.log('\n--- Telegram summary preview (draft, not send-ready) ---\n' + summary);
   if (!sourceLogs.some(s => s.status === 'ok' && s.count > 0)) process.exitCode = 2;
   if (!accepted.length) process.exitCode = 3;
 }
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon };
