@@ -47,3 +47,12 @@ Every run stores:
 - error log.
 
 If all sources fail, the run must alert as a real blocker instead of sending an empty or fake summary.
+
+## Gate 6 — Dedicated per-event review
+Before sending, scheduling, or presenting recommendations as final:
+- Create one dedicated isolated agent/session per shortlisted event.
+- The agent must open/read the canonical event page, not only reuse scraper output.
+- The agent must verify date/time, location, price/booking, age/family suitability, weather/indoor-outdoor sensitivity, and practical caveats.
+- The agent must explicitly challenge whether the event deserves its rank for Johan, Daisy, Andy, and Lennon.
+- Store one review artifact per event under the run directory, e.g. `event-reviews/<event-id>.md`.
+- The final Telegram summary must incorporate these review verdicts or clearly mark unresolved uncertainty.

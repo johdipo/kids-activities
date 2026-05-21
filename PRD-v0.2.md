@@ -18,6 +18,7 @@ v0.2 is successful only if the output contains real, timely activities with enou
 4. Score and rank activities with transparent reasons.
 5. Generate a Telegram-ready summary in French.
 6. Persist logs and artifacts so a failed run is diagnosable.
+7. Before a recommendation is sent or treated as final, run a dedicated per-event review: one isolated agent/session opens the event page, verifies details, and writes a concise verdict.
 
 ## Non-goals
 - Buying tickets or registering the family automatically.
@@ -55,3 +56,4 @@ Each recommended item must include:
 - No event outside the target date window unless explicitly labelled “future idea”.
 - No activity recommended for both kids if it clearly excludes one of their ages.
 - Every recommendation must have a real source URL.
+- Every final recommendation must have a dedicated review artifact confirming the page was opened/read, key details were verified, and the fit/caveats were challenged independently.
