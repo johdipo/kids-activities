@@ -1,0 +1,13 @@
+Kids Activities v0.2 daily execution with mandatory dedicated event reviews.
+
+Work in /home/isaak/.openclaw/workspace. Do not hardcode a model. Verify cron/service assumptions if they matter before persistent edits.
+
+Steps:
+1. Run `cd kids-activities && node kids_activities_v1.js --fixture-test`.
+2. Run `cd kids-activities && node kids_activities_v1.js` to collect live source-backed weekend activities and produce artifacts.
+3. Run `cd kids-activities && node automation/monitor_v02.js --latest` (or without args) and inspect the JSON result plus the latest artifact directory.
+4. Read the latest `event-review-queue.json` and `event-reviews/TODO.md`. For each shortlisted event, spawn one isolated subagent/session dedicated to that event. Each review must open/read the canonical event page, verify date/time/place/price/booking/age/family fit/practical caveats, challenge the ranking, and write `event-reviews/<event-id>.md`. The review must include `## Verdict` with exactly one of `recommended`, `secondary`, or `rejected`, plus `## Summary line for Telegram` in French.
+5. After all event reviews complete, run `cd kids-activities && node automation/consolidate_reviews.js`. This creates `event-reviews/INDEX.md` and `telegram-summary-reviewed.txt`, dedupes duplicate event pages, and refuses to generate a final digest if a review is missing/invalid.
+6. If fixture tests, monitor, event reviews, and consolidation pass, send the exact content of `telegram-summary-reviewed.txt` to Telegram group `-1003706257133` (Activités en famille). Keep it as one concise Telegram-ready message; do not add a long preamble.
+7. If monitor fails, all sources fail, reviews cannot verify enough detail, or `automation/consolidate_reviews.js` fails, do not send a fake/empty family summary. Notify Johan on Telegram with the blocker and artifact path.
+8. Append a concise run note to `kids-activities/automation/out/monitor-log.jsonl` if the monitor did not already do so, and update `kanban/tasks/TASK-202.md` only for meaningful operational findings.
