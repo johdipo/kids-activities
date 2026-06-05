@@ -42,6 +42,10 @@ const SOURCES = {
   infomaniakYverdon: {
     url: 'https://infomaniak.events/fr-ch/yverdon-les-bains',
     kind: 'ticketing-agenda'
+  },
+  agendaCh: {
+    url: 'https://agenda.ch/fr/s/jsresults?where=Yverdon-les-Bains&distance=20000&search_form=true',
+    kind: 'appointment-directory-probe'
   }
 };
 
@@ -334,6 +338,46 @@ async function scrapeInfomaniakYverdon() {
   return events.filter(e => !e.error);
 }
 
+function extractAgendaChProfiles(html, baseUrl = 'https://agenda.ch/fr/s') {
+  const $ = cheerio.load(html);
+  const profileLinks = uniqBy($('a[href*="/fr/s/"]').map((_, a) => ({
+    title: stripLead($(a).text()),
+    url: canonicalUrl($(a).attr('href'), baseUrl)
+  })).get().filter(x => x.url && x.title && !/^\d+$/.test(x.title)), x => x.url);
+  const pageText = clean($('body').text());
+  const appointmentSignals = [
+    /prenez rendez-vous|prendre rendez-vous|rendez-vous en ligne/i.test(pageText),
+    /th[ée]rapeute|ost[ée]opathe|physioth[ée]rapeute|coach|coiffeur|institut de beaut[ée]/i.test(pageText),
+    /disponibilit[ée]s|s[ée]ances/i.test(pageText)
+  ].filter(Boolean).length;
+  const eventSignals = /\b(év[ée]nement|manifestation|spectacle|concert|festival|billetterie)\b/i.test(pageText);
+  return { profileLinks, appointmentSignals, eventSignals, title: clean($('title').text()) };
+}
+
+async function scrapeAgendaCh() {
+  const source = 'agenda-ch';
+  const urls = [
+    SOURCES.agendaCh.url,
+    'https://agenda.ch/fr/s/jsresults?what=Enfants&where=Yverdon-les-Bains&distance=20000&search_form=true',
+    'https://agenda.ch/fr/s/jsresults?what=Atelier&where=Yverdon-les-Bains&distance=20000&search_form=true',
+    'https://agenda.ch/fr/s/jsresults?what=Sport&where=Yverdon-les-Bains&distance=20000&search_form=true'
+  ];
+  const probes = [];
+  for (const url of urls) {
+    const html = await fetchHtml(url, 20000);
+    const extracted = extractAgendaChProfiles(html, url);
+    probes.push({ url, ...extracted, sampleProfiles: extracted.profileLinks.slice(0, 5) });
+  }
+  const exploitableEventPage = probes.some(p => p.eventSignals && p.appointmentSignals < 2);
+  return {
+    events: [],
+    note: exploitableEventPage
+      ? 'Agenda.ch probe found event-like wording, but no dated event cards were safely extractable yet.'
+      : `Agenda.ch is an appointment/practitioner directory in tested Yverdon queries, not a dated event agenda; ${probes.reduce((n, p) => n + p.profileLinks.length, 0)} practitioner/profile links inspected across ${probes.length} probes.`,
+    diagnostics: probes.map(p => ({ url: p.url, title: p.title, profiles: p.profileLinks.length, appointmentSignals: p.appointmentSignals, eventSignals: p.eventSignals, sampleProfiles: p.sampleProfiles }))
+  };
+}
+
 function rejectionReason(e, window) {
   if (!e.url) return 'missing_url';
   if (!e.title || /contact|horaires d'ouverture|agenda des manifestations|accueil/i.test(e.title)) return 'navigation_or_empty_title';
@@ -596,13 +640,21 @@ function eventReviewQueueMarkdown(queue) {
 async function collectAll() {
   const sourceLogs = [];
   const out = [];
-  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon })) {
+  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh })) {
     const started = new Date().toISOString();
     try {
-      const items = await fn();
+      const result = await fn();
+      const items = Array.isArray(result) ? result : (result.events || []);
       out.push(...items);
-      sourceLogs.push({ source, status: 'ok', fetchedAt: started, count: items.length });
-      console.log(`[OK] ${source}: ${items.length} events`);
+      sourceLogs.push({
+        source,
+        status: 'ok',
+        fetchedAt: started,
+        count: items.length,
+        ...(result && !Array.isArray(result) && result.note ? { note: result.note } : {}),
+        ...(result && !Array.isArray(result) && result.diagnostics ? { diagnostics: result.diagnostics } : {})
+      });
+      console.log(`[OK] ${source}: ${items.length} events${result && !Array.isArray(result) && result.note ? ` — ${result.note}` : ''}`);
     } catch (e) {
       sourceLogs.push({ source, status: 'error', fetchedAt: started, error: e.message });
       console.log(`[ERR] ${source}: ${e.message}`);
@@ -633,7 +685,11 @@ function runFixtureTests() {
   assert.strictEqual(parseFrenchDate('MARDI 05 MAI 2026'), '2026-05-05');
   assert.deepStrictEqual(parseInfomaniakDateRange('Du vendredi 22 au samedi 23 mai', 2026), { startDate: '2026-05-22', endDate: '2026-05-23' });
   assert.strictEqual(parseInfomaniakDateRange('Dimanche 24 mai - 13h30', 2026).startDate, '2026-05-24T13:30:00+02:00');
-  console.log(`[TEST] fixture/date tests passed (${fixtures.length} fixtures)`);
+  const agendaProbe = extractAgendaChProfiles('<html><head><title>Coach sportif à Yverdon-les-bains – Séances et disponibilités</title></head><body><a href="/fr/s/sport/yverdon/kalambay-training-sarl-Er757Rvn">Kalambay Training Sàrl</a><p>Prenez rendez-vous en ligne avec un thérapeute ou un coach. Disponibilités et séances.</p></body></html>');
+  assert.strictEqual(agendaProbe.profileLinks.length, 1);
+  assert(agendaProbe.appointmentSignals >= 2, 'agenda.ch probe should detect appointment-directory signals');
+  assert.strictEqual(agendaProbe.eventSignals, false);
+  console.log(`[TEST] fixture/date/source-probe tests passed (${fixtures.length} fixtures)`);
 }
 
 async function main() {
@@ -678,4 +734,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh };
