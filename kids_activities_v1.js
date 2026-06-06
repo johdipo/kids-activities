@@ -46,6 +46,11 @@ const SOURCES = {
   agendaCh: {
     url: 'https://agenda.ch/fr/s/jsresults?where=Yverdon-les-Bains&distance=20000&search_form=true',
     kind: 'appointment-directory-probe'
+  },
+  laDerivee: {
+    url: 'https://www.laderivee.ch/page/programme',
+    apiUrl: 'https://admin.laderivee.ch/api/supermassive/event/segment/5',
+    kind: 'summer-cultural-place'
   }
 };
 
@@ -57,6 +62,7 @@ const TAG_FR = {
 
 function clean(s = '') { return String(s).replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim(); }
 function stripLead(s = '') { return clean(s).replace(/^>\s*/, ''); }
+function htmlToText(html = '') { return clean(cheerio.load(`<main>${html || ''}</main>`)('main').text()); }
 function sha(s) { return crypto.createHash('sha1').update(s).digest('hex').slice(0, 12); }
 function canonicalUrl(href, base) { try { return new URL(href, base).toString().replace(/#.*$/, ''); } catch { return ''; } }
 function uniqBy(arr, keyFn) { const seen = new Set(); return arr.filter(x => { const k = keyFn(x); if (seen.has(k)) return false; seen.add(k); return true; }); }
@@ -378,6 +384,76 @@ async function scrapeAgendaCh() {
   };
 }
 
+function extractLaDeriveeApiToken(appJs = '') {
+  return appJs.match(/Authorization:\\?"Bearer \\?"\+String\(\\?"([^"\\]+)/)?.[1] || '';
+}
+
+function laDeriveeDateTime(date, time, isAllDay = false) {
+  if (!date) return null;
+  if (isAllDay || !time) return date;
+  const m = String(time).match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return date;
+  return `${date}T${m[1].padStart(2, '0')}:${m[2]}:00+02:00`;
+}
+
+function parseLaDeriveeEvent(raw) {
+  const tagText = (raw.tags || []).map(t => t.name || t.slug || '').filter(Boolean).join(', ');
+  const partnerText = (raw.partners || []).map(p => p.title || p.subtitle || '').filter(Boolean).join(', ');
+  const buttonText = (raw.buttons || []).map(b => [b.name, b.url].filter(Boolean).join(': ')).filter(Boolean).join(' | ');
+  const description = clean([raw.subtitle, htmlToText(raw.teaser || ''), tagText, partnerText].filter(Boolean).join(' — '));
+  const tags = inferTags(`${raw.title || ''} ${description} ${tagText}`).concat(['outdoor', 'culture', 'water']).filter((v, i, a) => a.indexOf(v) === i);
+  return normalizeEvent({
+    source: 'la-derivee',
+    title: raw.title,
+    startDate: laDeriveeDateTime(raw.date_start, raw.time_start, raw.is_all_day),
+    endDate: raw.date_end || null,
+    locationName: 'La Dérivée',
+    locationText: 'La Dérivée, Quai de Nogent, Yverdon-les-Bains',
+    city: 'Yverdon-les-Bains',
+    url: canonicalUrl(`/event/${raw.slug || raw.id}`, 'https://www.laderivee.ch'),
+    description,
+    priceText: 'Gratuit / buvette estivale (site: centre culturel estival gratuit)',
+    ageText: /enfants?|famille|atelier|animation|biblioth/i.test(description) ? 'famille / enfants mentionnés' : '',
+    tags,
+    evidence: clean([raw.title, raw.subtitle, `date ${raw.date_start}`, raw.time_start && `heure ${raw.time_start}`, tagText && `tags ${tagText}`, partnerText && `partenaires ${partnerText}`, htmlToText(raw.teaser || ''), buttonText].filter(Boolean).join(' | '))
+  });
+}
+
+async function fetchLaDeriveeApiToken() {
+  const html = await fetchHtml(SOURCES.laDerivee.url, 25000);
+  const $ = cheerio.load(html);
+  const appScript = $('script[src*="pages/_app-"]').attr('src') || $('script[src*="/_app"]').attr('src');
+  if (!appScript) throw new Error('La Dérivée: unable to find Next.js _app script for public API token discovery');
+  const appJs = await fetchHtml(canonicalUrl(appScript, SOURCES.laDerivee.url), 30000);
+  const token = extractLaDeriveeApiToken(appJs);
+  if (!token) throw new Error('La Dérivée: unable to extract public API token from _app script');
+  return token;
+}
+
+async function scrapeLaDerivee() {
+  const token = await fetchLaDeriveeApiToken();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 25000);
+  try {
+    const res = await fetch(SOURCES.laDerivee.apiUrl, {
+      signal: controller.signal,
+      headers: {
+        'user-agent': 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)',
+        'content-type': 'application/json',
+        authorization: `Bearer ${token}`
+      }
+    });
+    if (!res.ok) throw new Error(`${SOURCES.laDerivee.apiUrl} -> HTTP ${res.status}`);
+    const rawEvents = await res.json();
+    if (!Array.isArray(rawEvents)) throw new Error('La Dérivée API returned non-array payload');
+    return rawEvents
+      .filter(e => e && e.date_start && e.title && !/d[ée]riv[ée]e\s+ferm[ée]e|ferm[ée]/i.test(`${e.title} ${e.subtitle || ''} ${htmlToText(e.teaser || '')}`))
+      .map(parseLaDeriveeEvent);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function rejectionReason(e, window) {
   if (!e.url) return 'missing_url';
   if (!e.title || /contact|horaires d'ouverture|agenda des manifestations|accueil/i.test(e.title)) return 'navigation_or_empty_title';
@@ -640,7 +716,7 @@ function eventReviewQueueMarkdown(queue) {
 async function collectAll() {
   const sourceLogs = [];
   const out = [];
-  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh })) {
+  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -689,6 +765,12 @@ function runFixtureTests() {
   assert.strictEqual(agendaProbe.profileLinks.length, 1);
   assert(agendaProbe.appointmentSignals >= 2, 'agenda.ch probe should detect appointment-directory signals');
   assert.strictEqual(agendaProbe.eventSignals, false);
+  assert.strictEqual(extractLaDeriveeApiToken('Authorization:"Bearer "+String("abc123")'), 'abc123');
+  const laDerivee = parseLaDeriveeEvent({ id: 1, date_start: '2026-06-06', date_end: '2026-06-06', title: 'Marché des artisan.ne.s', subtitle: 'Animation', slug: 'marche-des-artisan-ne-s', time_start: '14:00:00.000', teaser: '<p>marché artisanal, stands de nourriture, henné, animations et performances</p>', tags: [{ name: 'Animation' }], partners: [{ title: 'CULMINA' }], buttons: [] });
+  assert.strictEqual(laDerivee.source, 'la-derivee');
+  assert.strictEqual(laDerivee.startDate, '2026-06-06T14:00:00+02:00');
+  assert.strictEqual(laDerivee.city, 'Yverdon-les-Bains');
+  assert(laDerivee.tags.includes('outdoor') && laDerivee.priceText.includes('Gratuit'), 'La Dérivée fixture should keep taste/price evidence');
   console.log(`[TEST] fixture/date/source-probe tests passed (${fixtures.length} fixtures)`);
 }
 
@@ -734,4 +816,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee };
