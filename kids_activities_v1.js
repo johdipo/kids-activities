@@ -80,16 +80,17 @@ async function fetchHtml(url, timeoutMs = 15000) {
 }
 
 const MONTHS = {
-  janvier: '01', février: '02', fevrier: '02', mars: '03', avril: '04', mai: '05', juin: '06',
-  juillet: '07', août: '08', aout: '08', septembre: '09', octobre: '10', novembre: '11', décembre: '12', decembre: '12'
+  janvier: '01', janv: '01', février: '02', fevrier: '02', févr: '02', fevr: '02', mars: '03', avril: '04', avr: '04', mai: '05', juin: '06',
+  juillet: '07', juil: '07', août: '08', aout: '08', septembre: '09', sept: '09', sep: '09', octobre: '10', oct: '10', novembre: '11', nov: '11', décembre: '12', decembre: '12', déc: '12', dec: '12'
 };
+const MONTH_RE = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join('|');
 
 function parseFrenchDate(text, fallbackYear = new Date().getFullYear()) {
   const t = clean(text).toLowerCase();
-  const m = t.match(/(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)?\s*(\d{1,2})\s+(janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)\s*(\d{4})?/i);
+  const m = t.match(new RegExp(`(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)?\\s*(\\d{1,2})\\s+(${MONTH_RE})\\.?(?:\\s+(\\d{4}))?`, 'i'));
   if (!m) return null;
   const day = m[1].padStart(2, '0');
-  const month = MONTHS[m[2]];
+  const month = MONTHS[m[2].toLowerCase()];
   const year = m[3] || String(fallbackYear);
   return `${year}-${month}-${day}`;
 }
@@ -273,7 +274,7 @@ function parseYverdonListing(parentText, anchorText, url) {
   let title = clean(anchorText);
   if (!title || title.length < 4) {
     title = evidence
-      .replace(/^\d{1,2}\s+\w+\s+(?:\d{1,2}\s+\w+\s+)?/i, '')
+      .replace(new RegExp(`^\\d{1,2}\\s+(${MONTH_RE})\\.?(?:\\s+\\d{1,2}\\s+(${MONTH_RE})\\.?)?`, 'i'), '')
       .replace(new RegExp(`${city}$`, 'i'), '')
       .trim();
   }
@@ -281,6 +282,50 @@ function parseYverdonListing(parentText, anchorText, url) {
     source: 'yverdon', title, startDate: isoDate(date, evidence), locationText: city, city, url,
     description: evidence, evidence
   });
+}
+
+function extractFrenchDates(text, fallbackYear = 2026) {
+  const out = [];
+  const re = new RegExp(`(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)?\\s*\\d{1,2}\\s+(?:${MONTH_RE})\\.?(?:\\s+\\d{4})?`, 'ig');
+  for (const m of clean(text).matchAll(re)) {
+    const date = parseFrenchDate(m[0], fallbackYear);
+    if (date) out.push(date);
+  }
+  return [...new Set(out)];
+}
+
+function parseYverdonDetail(html, url, fallback = {}) {
+  const $ = cheerio.load(html);
+  const title = clean($('h1').first().text()) || fallback.anchorText || fallback.title;
+  const textBlocks = $('.elementor-widget-text-editor').map((_, el) => clean($(el).text())).get().filter(Boolean);
+  const dateFields = $('.jet-listing-dynamic-field__content').map((_, el) => clean($(el).text()).replace(/^[-–]\s*/, '')).get().filter(Boolean);
+  const start = parseFrenchDate(dateFields[0] || fallback.parentText || '', 2026) || parseFrenchDate(fallback.parentText || '', 2026);
+  const end = parseFrenchDate(dateFields[1] || '', 2026);
+  const titleIdx = textBlocks.findIndex(t => t === title);
+  const detailBlocks = textBlocks.filter((t, i) => i !== titleIdx && !/^(Dates|Contactez-nous|Suivez-nous|Inscrivez-vous|Un site de l’Association)/i.test(t));
+  const city = textBlocks.find(t => /^(Yverdon-les-Bains|Grandson|Sainte-Croix|Orbe|Vallorbe|Concise|Yvonand)$/i.test(t)) || cityFromLocation(`${fallback.parentText || ''} ${textBlocks.join(' ')}`, 'Yverdon-les-Bains');
+  const cityIdx = textBlocks.indexOf(city);
+  const org = cityIdx >= 3 ? textBlocks[cityIdx - 3] : '';
+  const street = cityIdx >= 2 ? textBlocks[cityIdx - 2] : '';
+  const zip = cityIdx >= 1 ? textBlocks[cityIdx - 1] : '';
+  const locationText = clean([org, street, zip, city].filter(Boolean).join(', ')) || city;
+  const mainDescription = detailBlocks.slice(0, 2).filter(t => t !== org && t !== street && t !== zip && t !== city).join(' — ');
+  const practicalBlock = detailBlocks.find(t => /CHF|gratuit|entrée|prix|pass|réservation|inscription|horaires?|dates?\s+2026|informations? sur/i.test(t) && t !== mainDescription) || '';
+  const evidence = clean([title, dateFields.join(' '), mainDescription, locationText, practicalBlock].filter(Boolean).join(' | '));
+  const recurrenceDates = practicalBlock && /dates?\s+2026|samedi|dimanche|vendredi|jeudi|mercredi|mardi|lundi/i.test(practicalBlock)
+    ? extractFrenchDates(practicalBlock, 2026).filter(d => d >= (start || '0000-00-00') && (!end || d <= end))
+    : [];
+  const dates = recurrenceDates.length >= 2 ? recurrenceDates : [start].filter(Boolean);
+  const priceMatch = practicalBlock.match(/(?:CHF\s*\d+(?:[.,]\d+)?|entrée libre|prix libre|pass[^.]+CHF\s*\d+(?:[.,]\d+)?)/i);
+  const priceText = priceMatch ? clean(priceMatch[0]) : (/(?:gratuit(?:e|es)?\s+et\s+ouvert(?:e|es)?s?\s+à\s+tous|accès\s+gratuit|entrée\s+gratuite)/i.test(`${mainDescription} ${practicalBlock}`) ? 'Gratuit / ouvert à tous' : '');
+  return dates.map(date => normalizeEvent({
+    source: 'yverdon', title, startDate: isoDate(date, `${mainDescription} ${practicalBlock}`), endDate: recurrenceDates.length >= 2 ? null : end,
+    locationName: org || city, locationText, city, url,
+    description: mainDescription || fallback.parentText || title,
+    priceText,
+    ageText: /petits et grands|famille|enfants?|atelier|animations/i.test(`${mainDescription} ${practicalBlock}`) ? 'famille / enfants mentionnés' : '',
+    evidence
+  }));
 }
 
 async function scrapeYverdon() {
@@ -291,15 +336,25 @@ async function scrapeYverdon() {
     const anchorText = stripLead($(a).text());
     const parentText = clean($(a).closest('.jet-listing-grid__item,.elementor-widget,.e-con,article,div').text());
     return { anchorText, parentText, url: canonicalUrl($(a).attr('href'), SOURCES.yverdon.url) };
-  }).get().filter(x => x.url && (x.anchorText || x.parentText) && !/^fr$|^de$|^español$/i.test(x.anchorText)), x => `${x.url}|${x.parentText}`).slice(0, 80);
+  }).get().filter(x => x.url && (x.anchorText || x.parentText) && !/^fr$|^de$|^español$/i.test(x.anchorText)), x => x.url).slice(0, 80);
 
   const events = [];
-  for (const link of links) {
-    try {
-      events.push(parseYverdonListing(link.parentText, link.anchorText, link.url));
-    } catch (e) {
-      events.push({ source, title: link.anchorText || link.parentText, url: link.url, error: e.message });
-    }
+  for (let i = 0; i < links.length; i += 8) {
+    const batch = links.slice(i, i + 8);
+    const results = await Promise.all(batch.map(async link => {
+      try {
+        const detailHtml = await fetchHtml(link.url, 30000);
+        const detailEvents = parseYverdonDetail(detailHtml, link.url, link);
+        return detailEvents.length ? detailEvents : [parseYverdonListing(link.parentText, link.anchorText, link.url)];
+      } catch (e) {
+        try {
+          return [parseYverdonListing(link.parentText, link.anchorText, link.url)];
+        } catch {
+          return [{ source, title: link.anchorText || link.parentText, url: link.url, error: e.message }];
+        }
+      }
+    }));
+    events.push(...results.flat());
   }
   return events.filter(e => !e.error);
 }
@@ -759,6 +814,7 @@ function runFixtureTests() {
   }
   assert.strictEqual(parseFrenchDate('SAMEDI 23 mai 2026'), '2026-05-23');
   assert.strictEqual(parseFrenchDate('MARDI 05 MAI 2026'), '2026-05-05');
+  assert.strictEqual(parseFrenchDate('3 Oct 2026'), '2026-10-03');
   assert.deepStrictEqual(parseInfomaniakDateRange('Du vendredi 22 au samedi 23 mai', 2026), { startDate: '2026-05-22', endDate: '2026-05-23' });
   assert.strictEqual(parseInfomaniakDateRange('Dimanche 24 mai - 13h30', 2026).startDate, '2026-05-24T13:30:00+02:00');
   const agendaProbe = extractAgendaChProfiles('<html><head><title>Coach sportif à Yverdon-les-bains – Séances et disponibilités</title></head><body><a href="/fr/s/sport/yverdon/kalambay-training-sarl-Er757Rvn">Kalambay Training Sàrl</a><p>Prenez rendez-vous en ligne avec un thérapeute ou un coach. Disponibilités et séances.</p></body></html>');
@@ -771,6 +827,10 @@ function runFixtureTests() {
   assert.strictEqual(laDerivee.startDate, '2026-06-06T14:00:00+02:00');
   assert.strictEqual(laDerivee.city, 'Yverdon-les-Bains');
   assert(laDerivee.tags.includes('outdoor') && laDerivee.priceText.includes('Gratuit'), 'La Dérivée fixture should keep taste/price evidence');
+  const yverdonRecurring = parseYverdonDetail('<h1>Marchés d’été ArtYsans Yverdon 2026</h1><div class="jet-listing-dynamic-field__content">9 Mai 2026</div><div class="jet-listing-dynamic-field__content">- 3 Oct 2026</div><div class="elementor-widget-text-editor">Marchés artisanaux</div><div class="elementor-widget-text-editor">De 8h à 13h30. Dates 2026 : – Samedi 9 mai – Samedi 6 juin – Samedi 3 octobre</div><div class="elementor-widget-text-editor">Association ArtYsans Yverdon</div><div class="elementor-widget-text-editor">Centre ville</div><div class="elementor-widget-text-editor">1400</div><div class="elementor-widget-text-editor">Yverdon-les-Bains</div>', 'https://yverdonlesbainsregion.ch/evenement/marches-dete-artysans-yverdon-2026/');
+  assert.strictEqual(yverdonRecurring.length, 3);
+  assert.strictEqual(yverdonRecurring[1].startDate, '2026-06-06T08:00:00+02:00');
+  assert.strictEqual(yverdonRecurring[1].locationText, 'Association ArtYsans Yverdon, Centre ville, 1400, Yverdon-les-Bains');
   console.log(`[TEST] fixture/date/source-probe tests passed (${fixtures.length} fixtures)`);
 }
 
