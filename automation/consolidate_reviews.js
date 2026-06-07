@@ -38,7 +38,10 @@ function parseVerdict(markdown) {
 }
 
 function parseSummaryLine(markdown) {
-  const body = sectionAfterHeading(markdown, 'Summary line for Telegram');
+  const body = sectionAfterHeading(markdown, 'Summary line for Telegram')
+    || sectionAfterHeading(markdown, 'Summary line for Telegram in French')
+    || sectionAfterHeading(markdown, 'Résumé Telegram')
+    || sectionAfterHeading(markdown, 'Ligne de résumé Telegram');
   return body.split('\n').map(x => x.trim()).filter(Boolean).join(' ');
 }
 
