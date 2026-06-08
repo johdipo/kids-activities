@@ -232,36 +232,83 @@ function extractAfter(label, text, stopLabels) {
   return clean(tail.slice(0, stop));
 }
 
+function grandsonMonthUrls(now = new Date(), horizonMonths = 6) {
+  const urls = [];
+  let y = now.getUTCFullYear();
+  let m = now.getUTCMonth() + 1;
+  for (let i = 0; i < horizonMonths; i++) {
+    urls.push(`${SOURCES.grandson.url}?mois=${m}&annee=${y}`);
+    m += 1;
+    if (m > 12) { m = 1; y += 1; }
+  }
+  return urls;
+}
+
+function extractGrandsonCalendarOccurrences(html, pageUrl) {
+  const $ = cheerio.load(html);
+  const url = new URL(pageUrl);
+  const month = String(url.searchParams.get('mois') || (new Date().getUTCMonth() + 1)).padStart(2, '0');
+  const year = url.searchParams.get('annee') || String(new Date().getUTCFullYear());
+  const occurrences = [];
+  $('table.agenda tr').each((i, tr) => {
+    if (!$(tr).hasClass('cal-texte')) return;
+    const dayCells = $(tr).prev('tr').children('td').map((_, td) => clean($(td).text())).get();
+    $(tr).children('td').each((cellIdx, td) => {
+      const day = Number(dayCells[cellIdx]);
+      if (!day || $(td).hasClass('gris')) return;
+      const date = `${year}-${month}-${String(day).padStart(2, '0')}`;
+      $(td).find('a[href*="/agenda/"]').each((_, a) => {
+        const title = stripLead($(a).text());
+        const eventUrl = canonicalUrl($(a).attr('href'), SOURCES.grandson.url);
+        if (title.length > 5 && eventUrl) occurrences.push({ title, url: eventUrl, date });
+      });
+    });
+  });
+  if (occurrences.length) return uniqBy(occurrences, x => `${x.url}|${x.date}`);
+
+  return uniqBy($('a[href*="/agenda/"]').map((_, a) => ({
+    title: stripLead($(a).text()), url: canonicalUrl($(a).attr('href'), SOURCES.grandson.url), date: null
+  })).get().filter(x => x.title.length > 5 && !/agenda des manifestations|ajouter mon/i.test(x.title)), x => x.url);
+}
+
+function parseGrandsonDetail(html, fallback = {}) {
+  const $ = cheerio.load(html);
+  const title = stripLead(fallback.title || $('meta[property="og:title"]').attr('content') || $('title').text()).replace(/\s+[–-]\s+Grandson.*/, '');
+  const mainText = clean($('.container .content').first().text()) || bestDetailText($, title);
+  const detailDate = parseFrenchDate(mainText, 2026) || parseNumericDate(mainText, 2026);
+  const horaires = extractAfter('Horaires', mainText, ['Prix', 'Contact', 'Organisation', 'Retour']);
+  const location = extractAfter('Lieu', mainText, ['Horaires', 'Durée', 'Prix', 'Contact', 'Organisation', 'Retour']);
+  const price = extractAfter('Prix', mainText, ['Contact', 'Organisation', 'Retour']);
+  const org = extractAfter('Organisation', mainText, ['Lieu', 'Horaires', 'Prix', 'Contact', 'Retour']);
+  const orgIdx = mainText.indexOf('Organisation');
+  const lieuIdx = mainText.indexOf('Lieu');
+  const desc = orgIdx > 0 ? mainText.slice(0, orgIdx) : (lieuIdx > 0 ? mainText.slice(0, lieuIdx) : mainText);
+  const date = fallback.date || detailDate;
+  const ageText = /familles?|enfants?|dès\s+\d+\s+ans|jeux|ludique|bibli|conte/i.test(mainText) ? 'famille / enfants mentionnés' : '';
+  return normalizeEvent({
+    source: 'grandson', title, startDate: isoDate(date, horaires), locationName: org || location.split(/\s+Rue\s+|\s+Route\s+/)[0],
+    locationText: location || 'Grandson', city: cityFromLocation(location, 'Grandson'), url: fallback.url,
+    description: desc.replace(title, '').replace(/^(lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\s+\d{1,2}\s+\w+\s+\d{4}/i, ''),
+    priceText: price, ageText, rawSnippet: mainText,
+    evidence: clean([title, date, horaires, location, price, desc].filter(Boolean).join(' | '))
+  });
+}
+
 async function scrapeGrandson() {
   const source = 'grandson';
-  const html = await fetchHtml(SOURCES.grandson.url);
-  const $ = cheerio.load(html);
-  const links = uniqBy($('a[href*="/agenda/"]').map((_, a) => ({
-    title: stripLead($(a).text()), url: canonicalUrl($(a).attr('href'), SOURCES.grandson.url)
-  })).get().filter(x => x.title.length > 5 && !/agenda des manifestations|ajouter mon/i.test(x.title)), x => x.url).slice(0, 80);
-
+  const occurrences = [];
+  for (const url of grandsonMonthUrls(new Date(), 6)) {
+    const html = await fetchHtml(url);
+    occurrences.push(...extractGrandsonCalendarOccurrences(html, url));
+  }
+  const detailCache = new Map();
   const events = [];
-  for (const link of links) {
+  for (const occ of uniqBy(occurrences, x => `${x.url}|${x.date || ''}`)) {
     try {
-      const detail = await fetchHtml(link.url);
-      const $$ = cheerio.load(detail);
-      const title = stripLead(link.title.replace(/^>\s*/, '')) || clean($$('title').text()).replace(/\s+–\s+Grandson.*/, '');
-      const mainText = bestDetailText($$, title);
-      const date = parseFrenchDate(mainText, 2026) || parseNumericDate(mainText, 2026);
-      const horaires = extractAfter('Horaires', mainText, ['Prix', 'Contact', 'Organisation', 'Retour']);
-      const location = extractAfter('Lieu', mainText, ['Horaires', 'Durée', 'Prix', 'Contact', 'Organisation', 'Retour']);
-      const price = extractAfter('Prix', mainText, ['Contact', 'Organisation', 'Retour']);
-      const orgIdx = mainText.indexOf('Organisation');
-      const lieuIdx = mainText.indexOf('Lieu');
-      const desc = orgIdx > 0 ? mainText.slice(0, orgIdx) : (lieuIdx > 0 ? mainText.slice(0, lieuIdx) : mainText);
-      events.push(normalizeEvent({
-        source, title, startDate: isoDate(date, horaires), locationName: location.split(/\s+Rue\s+|\s+Route\s+/)[0],
-        locationText: location || 'Grandson', city: cityFromLocation(location, 'Grandson'), url: link.url,
-        description: desc.replace(title, '').replace(/^(lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\s+\d{1,2}\s+\w+\s+\d{4}/i, ''),
-        priceText: price, rawSnippet: mainText
-      }));
+      if (!detailCache.has(occ.url)) detailCache.set(occ.url, await fetchHtml(occ.url));
+      events.push(parseGrandsonDetail(detailCache.get(occ.url), occ));
     } catch (e) {
-      events.push({ source, title: link.title, url: link.url, error: e.message });
+      events.push({ source, title: occ.title, url: occ.url, error: e.message });
     }
   }
   return events.filter(e => !e.error);
@@ -831,6 +878,12 @@ function runFixtureTests() {
   assert.strictEqual(yverdonRecurring.length, 3);
   assert.strictEqual(yverdonRecurring[1].startDate, '2026-06-06T08:00:00+02:00');
   assert.strictEqual(yverdonRecurring[1].locationText, 'Association ArtYsans Yverdon, Centre ville, 1400, Yverdon-les-Bains');
+  const grandsonOccurrences = extractGrandsonCalendarOccurrences('<table class="agenda"><tr><td>Lundi</td><td>Mardi</td></tr><tr><td>8</td><td>9</td></tr><tr class="cal-texte"><td><span class="cal"><a href="/agenda/fete/">&gt; Fête familiale</a></span></td><td class="gris"><a href="/agenda/passe/">&gt; Passé</a></td></tr></table>', 'https://www.grandson.ch/vie-locale/agenda-des-manifestations/?mois=6&annee=2026');
+  assert.deepStrictEqual(grandsonOccurrences, [{ title: 'Fête familiale', url: 'https://www.grandson.ch/agenda/fete/', date: '2026-06-08' }]);
+  const grandsonEvent = parseGrandsonDetail('<main><div class="container"><div class="content">Fête familiale DIMANCHE 14 JUIN 2026 Jeux et buvette pour enfants Organisation Association Grandson Lieu Salle des Quais Rue Basse Horaires 13h-17h Prix Gratuit Contact info@example.ch Retour</div></div></main>', { title: 'Fête familiale', url: 'https://www.grandson.ch/agenda/fete/', date: '2026-06-15' });
+  assert.strictEqual(grandsonEvent.startDate, '2026-06-15T13:00:00+02:00');
+  assert.strictEqual(grandsonEvent.priceText, 'Gratuit');
+  assert.strictEqual(grandsonEvent.locationName, 'Association Grandson');
   console.log(`[TEST] fixture/date/source-probe tests passed (${fixtures.length} fixtures)`);
 }
 
@@ -876,4 +929,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee };
