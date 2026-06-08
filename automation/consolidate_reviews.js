@@ -39,6 +39,7 @@ function parseVerdict(markdown) {
 
 function parseSummaryLine(markdown) {
   const body = sectionAfterHeading(markdown, 'Summary line for Telegram')
+    || sectionAfterHeading(markdown, 'Summary line for Telegram (in French)')
     || sectionAfterHeading(markdown, 'Summary line for Telegram in French')
     || sectionAfterHeading(markdown, 'Résumé Telegram')
     || sectionAfterHeading(markdown, 'Ligne de résumé Telegram');
