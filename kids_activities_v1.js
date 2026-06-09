@@ -51,6 +51,11 @@ const SOURCES = {
     url: 'https://www.laderivee.ch/page/programme',
     apiUrl: 'https://admin.laderivee.ch/api/supermassive/event/segment/5',
     kind: 'summer-cultural-place'
+  },
+  orbe: {
+    url: 'https://www.orbe.ch/agenda-manifestations.%20html',
+    apiUrl: 'https://geocity.ch/rest/agenda',
+    kind: 'geocity-communal-agenda'
   }
 };
 
@@ -556,6 +561,98 @@ async function scrapeLaDerivee() {
   }
 }
 
+function orbeEventUrl(id) {
+  return `${SOURCES.orbe.url}#/event/${id}`;
+}
+
+function parseOrbeEvent(feature) {
+  const raw = feature?.properties || feature || {};
+  const detailText = clean([
+    raw.summary,
+    raw.location_details,
+    raw.schedule,
+    raw.pricing,
+    raw.publics,
+    raw.genre_evenement,
+    raw.organizer_name,
+    raw.website
+  ].filter(Boolean).join(' | '));
+  const publics = clean(raw.publics || '');
+  const ageText = /familles?|jeune public|enfants?|tout public/i.test(publics)
+    ? publics
+    : (/familles?|jeune public|enfants?|tout public|jeux|atelier|animation/i.test(`${raw.title || ''} ${detailText}`) ? 'famille / enfants mentionnés' : publics);
+  const tags = inferTags(`${raw.title || ''} ${detailText} ${raw.genre_evenement || ''}`);
+  if (/familles?|jeune public/i.test(publics) && !tags.includes('discovery')) tags.push('discovery');
+  return normalizeEvent({
+    source: 'orbe',
+    title: raw.title,
+    startDate: raw.starts_at || null,
+    endDate: raw.ends_at || null,
+    locationName: (raw.location_details || '').split(',')[0],
+    locationText: raw.location_details || 'Orbe',
+    city: 'Orbe',
+    url: orbeEventUrl(raw.id),
+    description: clean([raw.summary, raw.schedule].filter(Boolean).join(' — ')),
+    priceText: raw.pricing || '',
+    ageText,
+    tags,
+    evidence: clean([
+      raw.title,
+      raw.starts_at && `début ${raw.starts_at}`,
+      raw.ends_at && `fin ${raw.ends_at}`,
+      raw.location_details,
+      raw.pricing && `prix ${raw.pricing}`,
+      raw.publics && `public ${raw.publics}`,
+      raw.genre_evenement && `type ${raw.genre_evenement}`,
+      raw.organizer_name && `organisateur ${raw.organizer_name}`,
+      raw.website && `site ${raw.website}`,
+      raw.summary
+    ].filter(Boolean).join(' | '))
+  });
+}
+
+async function fetchOrbeJson(url, timeoutMs = 25000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'user-agent': 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)',
+        accept: 'application/json',
+        referer: SOURCES.orbe.url
+      }
+    });
+    if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function scrapeOrbe() {
+  const ids = [];
+  let nextUrl = `${SOURCES.orbe.apiUrl}?domain=agenda_orbe&page=1&page_size=50`;
+  for (let page = 0; nextUrl && page < 10; page++) {
+    const payload = await fetchOrbeJson(nextUrl, 30000);
+    for (const feature of payload.features || []) {
+      const id = feature?.properties?.id;
+      if (id) ids.push(id);
+    }
+    nextUrl = payload.next || '';
+  }
+  const events = [];
+  for (const id of [...new Set(ids)]) {
+    try {
+      const detail = await fetchOrbeJson(`${SOURCES.orbe.apiUrl}/${id}`, 25000);
+      events.push(parseOrbeEvent(detail));
+    } catch (e) {
+      events.push({ source: 'orbe', title: `Orbe event ${id}`, url: orbeEventUrl(id), error: e.message });
+    }
+  }
+  return events.filter(e => !e.error);
+}
+
 function rejectionReason(e, window) {
   if (!e.url) return 'missing_url';
   if (!e.title || /contact|horaires d'ouverture|agenda des manifestations|accueil/i.test(e.title)) return 'navigation_or_empty_title';
@@ -818,7 +915,7 @@ function eventReviewQueueMarkdown(queue) {
 async function collectAll() {
   const sourceLogs = [];
   const out = [];
-  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee })) {
+  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -884,6 +981,13 @@ function runFixtureTests() {
   assert.strictEqual(grandsonEvent.startDate, '2026-06-15T13:00:00+02:00');
   assert.strictEqual(grandsonEvent.priceText, 'Gratuit');
   assert.strictEqual(grandsonEvent.locationName, 'Association Grandson');
+  const orbeEvent = parseOrbeEvent({ properties: { id: 32442, title: "T'as où les jeux", starts_at: '2026-06-10T18:30:00+02:00', ends_at: '2026-06-10T23:00:00+02:00', location_details: 'Hessel Espace Culturel, Rue Davall 3, 1350 Orbe', summary: 'Jeux de sociétés à disposition', pricing: '0.-', schedule: 'Dès 18h30', publics: 'Familles', genre_evenement: 'Culture', organizer_name: 'Association Hessel Espace Culturel' } });
+  assert.strictEqual(orbeEvent.source, 'orbe');
+  assert.strictEqual(orbeEvent.city, 'Orbe');
+  assert.strictEqual(orbeEvent.startDate, '2026-06-10T18:30:00+02:00');
+  assert.strictEqual(orbeEvent.priceText, '0.-');
+  assert.strictEqual(orbeEvent.ageText, 'Familles');
+  assert(orbeEvent.url.includes('#/event/32442'), 'Orbe event should keep stable agenda event URL');
   console.log(`[TEST] fixture/date/source-probe tests passed (${fixtures.length} fixtures)`);
 }
 
@@ -929,4 +1033,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe };
