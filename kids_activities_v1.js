@@ -20,6 +20,7 @@ const LOCATION_KM_FROM_YVERDON = {
   concise: 13,
   yvonand: 10,
   orbe: 12,
+  vallorbe: 23,
   'sainte-croix': 23,
   lausanne: 39,
   morat: 38,
@@ -56,6 +57,10 @@ const SOURCES = {
     url: 'https://www.orbe.ch/agenda-manifestations.%20html',
     apiUrl: 'https://geocity.ch/rest/agenda',
     kind: 'geocity-communal-agenda'
+  },
+  vallorbe: {
+    url: 'https://www.vallorbe.ch/agenda?datumVon=11.06.2026&datumBis=21.06.2027',
+    kind: 'iweb-communal-agenda'
   }
 };
 
@@ -192,7 +197,7 @@ function parseAge(ageText, text = '') {
 
 function cityFromLocation(text, fallback = '') {
   const t = clean(text);
-  for (const c of ['Yverdon-les-Bains', 'Yverdon', 'Grandson', 'Concise', 'Lausanne', 'Sainte-Croix', 'Yvonand', 'Orbe']) {
+  for (const c of ['Yverdon-les-Bains', 'Yverdon', 'Grandson', 'Concise', 'Lausanne', 'Sainte-Croix', 'Yvonand', 'Vallorbe', 'Orbe']) {
     if (new RegExp(c, 'i').test(t)) return c === 'Yverdon' ? 'Yverdon-les-Bains' : c;
   }
   return fallback;
@@ -653,6 +658,91 @@ async function scrapeOrbe() {
   return events.filter(e => !e.error);
 }
 
+
+function vallorbeEventUrl(id) {
+  return canonicalUrl(`/_rte/anlass/${id}`, 'https://www.vallorbe.ch');
+}
+
+function extractVallorbeListings(html) {
+  const $ = cheerio.load(html);
+  const attr = $('#anlassList').attr('data-entities');
+  if (!attr) return [];
+  const payload = JSON.parse(attr);
+  return (payload.data || []).map(row => {
+    const nameHtml = row.name || '';
+    const name$ = cheerio.load(nameHtml);
+    const link = name$('a').attr('href');
+    return {
+      id: row.id,
+      title: clean(name$.text() || row.name),
+      url: vallorbeEventUrl(row.id) || canonicalUrl(link, SOURCES.vallorbe.url),
+      startDate: row._datumVon || null,
+      endDate: row._datumBis || null,
+      locationText: clean(cheerio.load(row.lokalitaet || '').text() || row._ort || 'Vallorbe'),
+      city: row._ort || 'Vallorbe',
+      organizer: clean(cheerio.load(row.organisator || '').text())
+    };
+  }).filter(x => x.id && x.title && x.startDate);
+}
+
+function parseVallorbeDateTime(text, fallbackDate) {
+  const date = parseFrenchDate(text, 2026) || parseNumericDate(text, 2026) || fallbackDate;
+  return isoDate(date, text);
+}
+
+function parseVallorbeDetail(html, fallback = {}) {
+  const $ = cheerio.load(html);
+  let title = clean($('main h1.contentTitle, main h1').first().text()) || fallback.title;
+  if (!title || /^(Contact|Connexion|Rechercher)$/i.test(title)) title = fallback.title;
+  const mainText = bestDetailText($, title) || clean($('main').first().text()) || clean($('body').text());
+  const dateLineRe = new RegExp(`\\d{1,2}\\s+(?:${MONTH_RE})\\.?\\s+\\d{4}(?:,?\\s*\\d{1,2}h\\d{0,2}(?:\\s*-\\s*\\d{1,2}h\\d{0,2})?)?`, 'i');
+  const dateLine = (mainText.match(dateLineRe) || [])[0] || '';
+  const location = extractAfter('Lieu', mainText, ['Contact', 'Organisateur', 'Organisation', 'Prix', 'Retour']) || fallback.locationText || 'Vallorbe';
+  const contact = extractAfter('Contact', mainText, ['Organisateur', 'Organisation', 'Prix', 'Retour']);
+  const organizer = fallback.organizer || extractAfter('Organisateur', mainText, ['Lieu', 'Contact', 'Prix', 'Retour']) || extractAfter('Organisation', mainText, ['Lieu', 'Contact', 'Prix', 'Retour']);
+  const price = extractAfter('Prix', mainText, ['Contact', 'Organisateur', 'Organisation', 'Retour']);
+  const description = clean(mainText
+    .replace(/^.*?Agenda\(sélectionné\)/, '')
+    .replace(title, '')
+    .replace(dateLine, '')
+    .replace(/Lieu.*$/i, '')
+  );
+  const evidence = clean([title, dateLine || fallback.startDate, location, organizer, contact, price, description].filter(Boolean).join(' | '));
+  return normalizeEvent({
+    source: 'vallorbe',
+    title,
+    startDate: parseVallorbeDateTime(dateLine, fallback.startDate),
+    endDate: fallback.endDate || null,
+    locationName: location.split(/Place|Rue|Route|\d{4}/)[0],
+    locationText: location,
+    city: cityFromLocation(location, fallback.city || 'Vallorbe'),
+    url: fallback.url || vallorbeEventUrl(fallback.id),
+    description: description || organizer || title,
+    priceText: price,
+    ageText: /familles?|enfants?|jeunesse|tout public|jeux|atelier|biblioth/i.test(evidence) ? 'famille / enfants mentionnés' : '',
+    evidence
+  });
+}
+
+async function scrapeVallorbe() {
+  const html = await fetchHtml(SOURCES.vallorbe.url, 30000);
+  const listings = extractVallorbeListings(html);
+  const events = [];
+  for (const item of listings) {
+    try {
+      const detailHtml = await fetchHtml(item.url, 25000);
+      events.push(parseVallorbeDetail(detailHtml, item));
+    } catch (e) {
+      events.push(normalizeEvent({
+        source: 'vallorbe', title: item.title, startDate: item.startDate, endDate: item.endDate,
+        locationText: item.locationText, city: item.city, url: item.url, description: item.organizer,
+        evidence: clean([item.title, item.startDate, item.endDate, item.locationText, item.organizer].filter(Boolean).join(' | '))
+      }));
+    }
+  }
+  return events;
+}
+
 function rejectionReason(e, window) {
   if (!e.url) return 'missing_url';
   if (!e.title || /contact|horaires d'ouverture|agenda des manifestations|accueil/i.test(e.title)) return 'navigation_or_empty_title';
@@ -915,7 +1005,7 @@ function eventReviewQueueMarkdown(queue) {
 async function collectAll() {
   const sourceLogs = [];
   const out = [];
-  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe })) {
+  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -988,6 +1078,13 @@ function runFixtureTests() {
   assert.strictEqual(orbeEvent.priceText, '0.-');
   assert.strictEqual(orbeEvent.ageText, 'Familles');
   assert(orbeEvent.url.includes('#/event/32442'), 'Orbe event should keep stable agenda event URL');
+  const vallorbeFixtureEntities = JSON.stringify({ data: [{ id: '7564447', name: '<a href="/_rte/anlass/7564447">Séance du Conseil communal</a>', _datumVon: '2026-08-31', _datumBis: '2026-08-31', _ort: 'Vallorbe', lokalitaet: 'Grande salle', organisator: 'Commune' }] }).replace(/"/g, '&quot;');
+  const vallorbeRows = extractVallorbeListings(`<table id="anlassList" data-entities="${vallorbeFixtureEntities}"></table>`);
+  assert.strictEqual(vallorbeRows.length, 1);
+  const vallorbeEvent = parseVallorbeDetail('<main><h1 class="contentTitle">Séance du Conseil communal</h1>31 août 2026, 18h30 - 22h00 Lieu Grande salle, 1er étage du Casino Place du Pont 3 1337 Vallorbe Contact conseil@vallorbe.ch</main>', vallorbeRows[0]);
+  assert.strictEqual(vallorbeEvent.source, 'vallorbe');
+  assert.strictEqual(vallorbeEvent.startDate, '2026-08-31T18:30:00+02:00');
+  assert.strictEqual(vallorbeEvent.city, 'Vallorbe');
   console.log(`[TEST] fixture/date/source-probe tests passed (${fixtures.length} fixtures)`);
 }
 
@@ -1033,4 +1130,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe };
