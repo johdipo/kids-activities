@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "source": "manualJohan",
   "description": "Événements fournis directement par Johan (photos, affiches, PDF, texte). Les entrées OCR/incertaines restent en needs_review jusqu’à confirmation.",
-  "updatedAt": "2026-06-12T09:20:00Z",
+  "updatedAt": "2026-06-12T12:38:00Z",
   "entries": [
     {
       "id": "theatre-passage-tu-comprendras-quand-tu-seras-grand-2026",
-      "status": "needs_review",
+      "status": "confirmed",
       "title": "Tu comprendras quand tu seras grand",
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
@@ -18,18 +18,21 @@
       ],
       "dates": [
         {
-          "startDate": "2026-10-25T11:00:00+02:00"
+          "startDate": "2026-10-25T11:00:00+01:00"
         },
         {
-          "startDate": "2026-10-25T17:00:00+02:00"
+          "startDate": "2026-10-25T17:00:00+01:00"
         }
       ],
       "sourceFiles": [
         "/home/isaak/.openclaw/media/inbound/file_33---3f49f9a8-1ebb-477b-bb50-c0bd27cf5537.jpg",
         "/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"
       ],
-      "ocrEvidence": "D25 oct a 11h00 et 17h00; Tu comprendras quand tu seras grand; Dès 6 ans; Théâtre du Passage",
-      "notes": "OCR compacté: vérifier le jour exact sur le programme complet."
+      "ocrEvidence": "D25 oct a 11h00 et 17h00; Tu comprendras quand tu seras grand; Dès 6 ans; Théâtre du Passage | OFFICIAL_PASS_FAMILLE_CONFIRMED",
+      "notes": "Dates/heures confirmées par la page officielle Pass’famille du Théâtre du Passage; l’OCR photo reste conservé comme provenance secondaire.",
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ]
     },
     {
       "id": "theatre-passage-entranas-entrailles-2026",
@@ -58,7 +61,7 @@
     },
     {
       "id": "theatre-passage-pouvoir-2026",
-      "status": "needs_review",
+      "status": "confirmed",
       "title": "Pouvoir",
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
@@ -81,11 +84,15 @@
       "sourceFiles": [
         "/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"
       ],
-      "ocrEvidence": "Sa. 14 nov. à 18h00; Pouvoir; Dès 10 ans; Di. 15 nov. à 11h00 et 15h00; Théâtre du Passage"
+      "ocrEvidence": "Sa. 14 nov. à 18h00; Pouvoir; Dès 10 ans; Di. 15 nov. à 11h00 et 15h00; Théâtre du Passage | OFFICIAL_PASS_FAMILLE_CONFIRMED",
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "notes": "Dates/heures confirmées par la page officielle Pass’famille du Théâtre du Passage; l’OCR photo reste conservé comme provenance secondaire."
     },
     {
       "id": "theatre-passage-petite-balade-aux-enfers-2026",
-      "status": "needs_review",
+      "status": "confirmed",
       "title": "Petite balade aux enfers",
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
@@ -106,11 +113,15 @@
       "sourceFiles": [
         "/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"
       ],
-      "ocrEvidence": "Di. 15 nov. à 14h00 et 17h00; Petite balade aux enfers; Dès 6 ans; Théâtre du Passage"
+      "ocrEvidence": "Di. 15 nov. à 14h00 et 17h00; Petite balade aux enfers; Dès 6 ans; Théâtre du Passage | OFFICIAL_PASS_FAMILLE_CONFIRMED",
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "notes": "Dates/heures confirmées par la page officielle Pass’famille du Théâtre du Passage; l’OCR photo reste conservé comme provenance secondaire."
     },
     {
       "id": "theatre-passage-la-noce-d-alfonse-2026",
-      "status": "needs_review",
+      "status": "confirmed",
       "title": "La Noce d’Alfonse",
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
@@ -130,7 +141,11 @@
       "sourceFiles": [
         "/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"
       ],
-      "ocrEvidence": "Me. 2 déc. à 19h00; La Noce d’Alfonse; Dès 6 ans; Je. 3 déc. à 20h00; Théâtre du Passage"
+      "ocrEvidence": "Me. 2 déc. à 19h00; La Noce d’Alfonse; Dès 6 ans; Je. 3 déc. à 20h00; Théâtre du Passage | OFFICIAL_PASS_FAMILLE_CONFIRMED",
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "notes": "Dates/heures confirmées par la page officielle Pass’famille du Théâtre du Passage; l’OCR photo reste conservé comme provenance secondaire."
     },
     {
       "id": "theatre-passage-autour-du-feu-2026",
@@ -183,7 +198,7 @@
     },
     {
       "id": "theatre-passage-fertik-2026",
-      "status": "needs_review",
+      "status": "confirmed",
       "title": "Fertik",
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
@@ -209,7 +224,11 @@
       "sourceFiles": [
         "/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"
       ],
-      "ocrEvidence": "Je. 17 déc. à 20h00; Fertik; Dès 8 ans; Ve. 18 déc. à 20h00; Sa. 19 déc. à 18h00; Di. 20 déc. à 17h00; Théâtre du Passage"
+      "ocrEvidence": "Je. 17 déc. à 20h00; Fertik; Dès 8 ans; Ve. 18 déc. à 20h00; Sa. 19 déc. à 18h00; Di. 20 déc. à 17h00; Théâtre du Passage | OFFICIAL_PASS_FAMILLE_CONFIRMED",
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "notes": "Dates/heures confirmées par la page officielle Pass’famille du Théâtre du Passage; l’OCR photo reste conservé comme provenance secondaire."
     },
     {
       "id": "theatre-passage-retrospectaculaire-2027",
@@ -243,7 +262,7 @@
     },
     {
       "id": "theatre-passage-fusees-2027",
-      "status": "needs_review",
+      "status": "confirmed",
       "title": "Fusées",
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
@@ -255,22 +274,17 @@
       ],
       "dates": [
         {
-          "startDate": "2027-01-12T19:00:00+01:00"
-        },
-        {
-          "startDate": "2027-01-13T19:00:00+01:00"
-        },
-        {
-          "startDate": "2027-01-14T20:00:00+01:00"
-        },
-        {
           "startDate": "2027-01-16T18:00:00+01:00"
         }
       ],
       "sourceFiles": [
         "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
       ],
-      "ocrEvidence": "Ma. 12 et Me. 13 jan. à 19h00; Je. 14 jan. à 20h00; Sa. 16 jan. à 18h00; Fusées; Dès 6 ans; Théâtre du Passage"
+      "ocrEvidence": "Ma. 12 et Me. 13 jan. à 19h00; Je. 14 jan. à 20h00; Sa. 16 jan. à 18h00; Fusées; Dès 6 ans; Théâtre du Passage | OFFICIAL_PASS_FAMILLE_CONFIRMED",
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "notes": "Dates/heures confirmées par la page officielle Pass’famille du Théâtre du Passage; l’OCR photo reste conservé comme provenance secondaire."
     },
     {
       "id": "theatre-passage-opera-toute-seule-2027",
@@ -298,7 +312,7 @@
     },
     {
       "id": "theatre-passage-a-simple-space-2027",
-      "status": "needs_review",
+      "status": "confirmed",
       "title": "A Simple Space",
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
@@ -319,11 +333,15 @@
       "sourceFiles": [
         "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
       ],
-      "ocrEvidence": "Lu. 8 fév. à 20h00; A Simple Space; Dès 5 ans; Ma. 9 fév. à 20h00; Théâtre du Passage"
+      "ocrEvidence": "Lu. 8 fév. à 20h00; A Simple Space; Dès 5 ans; Ma. 9 fév. à 20h00; Théâtre du Passage | OFFICIAL_PASS_FAMILLE_CONFIRMED",
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "notes": "Dates/heures confirmées par la page officielle Pass’famille du Théâtre du Passage; l’OCR photo reste conservé comme provenance secondaire."
     },
     {
       "id": "theatre-passage-l-ours-kintsugi-2027",
-      "status": "needs_review",
+      "status": "confirmed",
       "title": "L’ours Kintsugi",
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
@@ -344,8 +362,11 @@
       "sourceFiles": [
         "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
       ],
-      "ocrEvidence": "Di. 14 fév. à 11h00 (?) et 17h00; L’ours Kintsugi; Dès 5 ans; Théâtre du Passage",
-      "notes": "OCR incertain sur la première heure: lu comme 'ah00', probablement 11h00 à confirmer."
+      "ocrEvidence": "Di. 14 fév. à 11h00 (?) et 17h00; L’ours Kintsugi; Dès 5 ans; Théâtre du Passage | OFFICIAL_PASS_FAMILLE_CONFIRMED",
+      "notes": "Dates/heures confirmées par la page officielle Pass’famille du Théâtre du Passage; l’OCR photo reste conservé comme provenance secondaire.",
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ]
     },
     {
       "id": "theatre-passage-lettres-au-chat-2027",
@@ -391,7 +412,7 @@
     },
     {
       "id": "theatre-passage-nous-ou-le-paradoxe-du-herisson-2027",
-      "status": "needs_review",
+      "status": "confirmed",
       "title": "Nous ou le paradoxe du hérisson",
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
@@ -400,16 +421,23 @@
         "culture",
         "indoor"
       ],
-      "dates": [],
+      "dates": [
+        {
+          "startDate": "2027-03-21T17:00:00+01:00"
+        }
+      ],
       "sourceFiles": [
         "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
       ],
-      "ocrEvidence": "Nous ou le paradoxe du hérisson; Dès 7 ans; Théâtre du Passage",
-      "notes": "Date non visible/suffisamment fiable sur cette photo. À compléter avec autre page ou confirmation."
+      "ocrEvidence": "Nous ou le paradoxe du hérisson; Dès 7 ans; Théâtre du Passage | OFFICIAL_PASS_FAMILLE_CONFIRMED",
+      "notes": "Dates/heures confirmées par la page officielle Pass’famille du Théâtre du Passage; l’OCR photo reste conservé comme provenance secondaire.",
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ]
     },
     {
       "id": "theatre-passage-bachibouzouk-2027",
-      "status": "needs_review",
+      "status": "confirmed",
       "title": "Bachibouzouk",
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
@@ -426,11 +454,15 @@
       "sourceFiles": [
         "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
       ],
-      "ocrEvidence": "Di. 2 mai à 17h00; Bachibouzouk; Dès 6 ans; Théâtre du Passage"
+      "ocrEvidence": "Di. 2 mai à 17h00; Bachibouzouk; Dès 6 ans; Théâtre du Passage | OFFICIAL_PASS_FAMILLE_CONFIRMED",
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "notes": "Dates/heures confirmées par la page officielle Pass’famille du Théâtre du Passage; l’OCR photo reste conservé comme provenance secondaire."
     },
     {
       "id": "theatre-passage-poil-de-la-bete-2027",
-      "status": "needs_review",
+      "status": "confirmed",
       "title": "Poil de la bête",
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
@@ -447,7 +479,11 @@
       "sourceFiles": [
         "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
       ],
-      "ocrEvidence": "Me. 12 mai à 19h00; Poil de la bête; Dès 3 ans; Théâtre du Passage"
+      "ocrEvidence": "Me. 12 mai à 19h00; Poil de la bête; Dès 3 ans; Théâtre du Passage | OFFICIAL_PASS_FAMILLE_CONFIRMED",
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "notes": "Dates/heures confirmées par la page officielle Pass’famille du Théâtre du Passage; l’OCR photo reste conservé comme provenance secondaire."
     },
     {
       "id": "theatre-passage-la-tente-2027",

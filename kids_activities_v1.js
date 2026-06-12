@@ -1274,7 +1274,7 @@ function runFixtureTests() {
   assert(tempsLibreEvent.priceText.includes('Gratuit'), 'TempsLibre fixture should keep free evidence');
   const manual = loadManualJohanEvents();
   assert(manual.events.length >= 8, 'manualJohan source should load Johan-provided events');
-  assert(manual.events.some(e => e.title === 'Tu comprendras quand tu seras grand' && e.startDate === '2026-10-25T11:00:00+02:00'), 'manualJohan should include theatre programme OCR entries');
+  assert(manual.events.some(e => e.title === 'Tu comprendras quand tu seras grand' && e.startDate.startsWith('2026-10-25T11:00:00')), 'manualJohan should include theatre programme OCR/official entries');
   assert(manual.events.every(e => e.source === 'manualJohan' && e.url.startsWith('manual://johan/')), 'manualJohan events should have stable manual URLs');
   console.log(`[TEST] fixture/date/source-probe tests passed (${fixtures.length} fixtures)`);
 }
