@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "source": "manualJohan",
+  "description": "Événements fournis directement par Johan (photos, affiches, PDF, texte). Les entrées OCR/incertaines restent en needs_review jusqu’à confirmation.",
+  "updatedAt": "2026-06-12T09:05:00Z",
+  "entries": [
+    {
+      "id": "theatre-passage-tu-comprendras-quand-tu-seras-grand-2026",
+      "status": "needs_review",
+      "title": "Tu comprendras quand tu seras grand",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 6 ans",
+      "tags": ["culture", "indoor", "discovery"],
+      "dates": [
+        { "startDate": "2026-10-25T11:00:00+02:00" },
+        { "startDate": "2026-10-25T17:00:00+02:00" }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_33---3f49f9a8-1ebb-477b-bb50-c0bd27cf5537.jpg",
+        "/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"
+      ],
+      "ocrEvidence": "D25 oct a 11h00 et 17h00; Tu comprendras quand tu seras grand; Dès 6 ans; Théâtre du Passage",
+      "notes": "OCR compacté: vérifier le jour exact sur le programme complet."
+    },
+    {
+      "id": "theatre-passage-entranas-entrailles-2026",
+      "status": "needs_review",
+      "title": "Entrañas (Entrailles)",
+      "venue": "Le Pommier",
+      "city": "Neuchâtel",
+      "ageText": "Dès 9 ans",
+      "tags": ["culture", "indoor"],
+      "dates": [
+        { "startDate": "2026-11-11T17:00:00+01:00" },
+        { "startDate": "2026-11-12T17:00:00+01:00" }
+      ],
+      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "ocrEvidence": "Me. 11 nov. à 17h00; Entrañas (Entrailles); Dès 9 ans; Je. 12 nov. à 17h00; Le Pommier",
+      "notes": "Titre et horaires OCR plausibles, accents/orthographe à confirmer."
+    },
+    {
+      "id": "theatre-passage-pouvoir-2026",
+      "status": "needs_review",
+      "title": "Pouvoir",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 10 ans",
+      "tags": ["culture", "indoor"],
+      "dates": [
+        { "startDate": "2026-11-14T18:00:00+01:00" },
+        { "startDate": "2026-11-15T11:00:00+01:00" },
+        { "startDate": "2026-11-15T15:00:00+01:00" }
+      ],
+      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "ocrEvidence": "Sa. 14 nov. à 18h00; Pouvoir; Dès 10 ans; Di. 15 nov. à 11h00 et 15h00; Théâtre du Passage"
+    },
+    {
+      "id": "theatre-passage-petite-balade-aux-enfers-2026",
+      "status": "needs_review",
+      "title": "Petite balade aux enfers",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 6 ans",
+      "tags": ["culture", "indoor", "discovery"],
+      "dates": [
+        { "startDate": "2026-11-15T14:00:00+01:00" },
+        { "startDate": "2026-11-15T17:00:00+01:00" }
+      ],
+      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "ocrEvidence": "Di. 15 nov. à 14h00 et 17h00; Petite balade aux enfers; Dès 6 ans; Théâtre du Passage"
+    },
+    {
+      "id": "theatre-passage-la-noce-d-alfonse-2026",
+      "status": "needs_review",
+      "title": "La Noce d’Alfonse",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 6 ans",
+      "tags": ["culture", "indoor"],
+      "dates": [
+        { "startDate": "2026-12-02T19:00:00+01:00" },
+        { "startDate": "2026-12-03T20:00:00+01:00" }
+      ],
+      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "ocrEvidence": "Me. 2 déc. à 19h00; La Noce d’Alfonse; Dès 6 ans; Je. 3 déc. à 20h00; Théâtre du Passage"
+    },
+    {
+      "id": "theatre-passage-autour-du-feu-2026",
+      "status": "needs_review",
+      "title": "Autour du feu",
+      "venue": "Le Pommier",
+      "city": "Neuchâtel",
+      "ageText": "Dès 6 ans",
+      "tags": ["culture", "indoor", "cosy"],
+      "dates": [
+        { "startDate": "2026-12-06T10:30:00+01:00" },
+        { "startDate": "2026-12-06T16:00:00+01:00" }
+      ],
+      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "ocrEvidence": "Di. 6 déc. à 10h30 et 16h00; Autour du feu; Dès 6 ans; Le Pommier"
+    },
+    {
+      "id": "theatre-passage-grande-soiree-doublages-improvises-2026",
+      "status": "needs_review",
+      "title": "La grande soirée des doublages improvisés",
+      "venue": "Le Pommier",
+      "city": "Neuchâtel",
+      "ageText": "Dès 12 ans",
+      "tags": ["culture", "indoor"],
+      "dates": [
+        { "startDate": "2026-12-09T19:00:00+01:00" },
+        { "startDate": "2026-12-10T20:00:00+01:00" }
+      ],
+      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "ocrEvidence": "Me. 9 déc. à 19h00; La grande soirée des doublages improvisés; Dès 12 ans; Je. 10 déc. à 20h00; Le Pommier"
+    },
+    {
+      "id": "theatre-passage-fertik-2026",
+      "status": "needs_review",
+      "title": "Fertik",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 8 ans",
+      "tags": ["culture", "indoor"],
+      "dates": [
+        { "startDate": "2026-12-17T20:00:00+01:00" },
+        { "startDate": "2026-12-18T20:00:00+01:00" },
+        { "startDate": "2026-12-19T18:00:00+01:00" },
+        { "startDate": "2026-12-20T17:00:00+01:00" }
+      ],
+      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "ocrEvidence": "Je. 17 déc. à 20h00; Fertik; Dès 8 ans; Ve. 18 déc. à 20h00; Sa. 19 déc. à 18h00; Di. 20 déc. à 17h00; Théâtre du Passage"
+    }
+  ]
+}

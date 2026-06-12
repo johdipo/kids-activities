@@ -65,6 +65,10 @@ const SOURCES = {
   tempsLibre: {
     url: 'https://www.tempslibre.ch/romandie/evenements/ce-week-end',
     kind: 'romandie-cultural-weekend-agenda'
+  },
+  manualJohan: {
+    url: 'manual://johan/kids-activities',
+    kind: 'local-human-curated-source'
   }
 };
 
@@ -221,6 +225,47 @@ function normalizeEvent(partial) {
   };
   event.id = eventId(event);
   return event;
+}
+
+function manualEventUrl(entry, occurrenceIndex) {
+  return `manual://johan/kids-activities/${encodeURIComponent(entry.id)}#${occurrenceIndex + 1}`;
+}
+
+function loadManualJohanEvents() {
+  const file = path.join(__dirname, 'data', 'manual-events.json');
+  if (!fs.existsSync(file)) return { events: [], note: 'manual-events.json missing' };
+  const db = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const events = [];
+  for (const entry of db.entries || []) {
+    if (entry.status === 'archived') continue;
+    for (const [idx, date] of (entry.dates || []).entries()) {
+      events.push(normalizeEvent({
+        source: 'manualJohan',
+        title: entry.title,
+        startDate: date.startDate,
+        endDate: date.endDate || null,
+        locationName: entry.venue || '',
+        locationText: [entry.venue, entry.city].filter(Boolean).join(', '),
+        city: entry.city || '',
+        url: manualEventUrl(entry, idx),
+        description: clean([
+          entry.description || '',
+          entry.status === 'needs_review' ? 'Source fournie par Johan — détails à confirmer avant recommandation ferme.' : '',
+          entry.notes || ''
+        ].filter(Boolean).join(' ')),
+        ageText: entry.ageText || '',
+        priceText: entry.priceText || '',
+        tags: entry.tags || [],
+        evidence: clean([
+          `Source manuelle Johan (${entry.status || 'candidate'})`,
+          entry.ocrEvidence || '',
+          entry.sourceFiles && entry.sourceFiles.length ? `Fichiers: ${entry.sourceFiles.join(', ')}` : '',
+          entry.notes || ''
+        ].filter(Boolean).join(' | '))
+      }));
+    }
+  }
+  return { events, note: `${events.length} manual occurrence(s) loaded from ${path.relative(process.cwd(), file)}` };
 }
 
 function bestDetailText($, title = '') {
@@ -1140,7 +1185,7 @@ function eventReviewQueueMarkdown(queue) {
 async function collectAll() {
   const sourceLogs = [];
   const out = [];
-  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre })) {
+  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, manualJohan: loadManualJohanEvents })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -1227,6 +1272,10 @@ function runFixtureTests() {
   assert.strictEqual(tempsLibreEvent.startDate, '2026-06-14T15:00:00+02:00');
   assert.strictEqual(tempsLibreEvent.city, 'Lausanne');
   assert(tempsLibreEvent.priceText.includes('Gratuit'), 'TempsLibre fixture should keep free evidence');
+  const manual = loadManualJohanEvents();
+  assert(manual.events.length >= 8, 'manualJohan source should load Johan-provided events');
+  assert(manual.events.some(e => e.title === 'Tu comprendras quand tu seras grand' && e.startDate === '2026-10-25T11:00:00+02:00'), 'manualJohan should include theatre programme OCR entries');
+  assert(manual.events.every(e => e.source === 'manualJohan' && e.url.startsWith('manual://johan/')), 'manualJohan events should have stable manual URLs');
   console.log(`[TEST] fixture/date/source-probe tests passed (${fixtures.length} fixtures)`);
 }
 
