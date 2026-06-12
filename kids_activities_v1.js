@@ -1238,7 +1238,11 @@ function canonicalRecommendationPool(events) {
 async function collectAll() {
   const sourceLogs = [];
   const out = [];
-  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates })) {
+  // Local Johan/manual sources are intentionally loaded first: they are durable,
+  // fast, and should remain visible even when a slow external source delays the
+  // wider collection. Recommendation dedupe still prefers official web sources
+  // over manual duplicates via canonicalRecommendationPool().
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
