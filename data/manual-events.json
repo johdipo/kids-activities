@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": "manualJohan",
   "description": "Événements fournis directement par Johan (photos, affiches, PDF, texte). Les entrées OCR/incertaines restent en needs_review jusqu’à confirmation.",
-  "updatedAt": "2026-06-12T09:05:00Z",
+  "updatedAt": "2026-06-12T09:20:00Z",
   "entries": [
     {
       "id": "theatre-passage-tu-comprendras-quand-tu-seras-grand-2026",
@@ -11,10 +11,18 @@
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
       "ageText": "Dès 6 ans",
-      "tags": ["culture", "indoor", "discovery"],
+      "tags": [
+        "culture",
+        "indoor",
+        "discovery"
+      ],
       "dates": [
-        { "startDate": "2026-10-25T11:00:00+02:00" },
-        { "startDate": "2026-10-25T17:00:00+02:00" }
+        {
+          "startDate": "2026-10-25T11:00:00+02:00"
+        },
+        {
+          "startDate": "2026-10-25T17:00:00+02:00"
+        }
       ],
       "sourceFiles": [
         "/home/isaak/.openclaw/media/inbound/file_33---3f49f9a8-1ebb-477b-bb50-c0bd27cf5537.jpg",
@@ -30,12 +38,21 @@
       "venue": "Le Pommier",
       "city": "Neuchâtel",
       "ageText": "Dès 9 ans",
-      "tags": ["culture", "indoor"],
-      "dates": [
-        { "startDate": "2026-11-11T17:00:00+01:00" },
-        { "startDate": "2026-11-12T17:00:00+01:00" }
+      "tags": [
+        "culture",
+        "indoor"
       ],
-      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "dates": [
+        {
+          "startDate": "2026-11-11T17:00:00+01:00"
+        },
+        {
+          "startDate": "2026-11-12T17:00:00+01:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"
+      ],
       "ocrEvidence": "Me. 11 nov. à 17h00; Entrañas (Entrailles); Dès 9 ans; Je. 12 nov. à 17h00; Le Pommier",
       "notes": "Titre et horaires OCR plausibles, accents/orthographe à confirmer."
     },
@@ -46,13 +63,24 @@
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
       "ageText": "Dès 10 ans",
-      "tags": ["culture", "indoor"],
-      "dates": [
-        { "startDate": "2026-11-14T18:00:00+01:00" },
-        { "startDate": "2026-11-15T11:00:00+01:00" },
-        { "startDate": "2026-11-15T15:00:00+01:00" }
+      "tags": [
+        "culture",
+        "indoor"
       ],
-      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "dates": [
+        {
+          "startDate": "2026-11-14T18:00:00+01:00"
+        },
+        {
+          "startDate": "2026-11-15T11:00:00+01:00"
+        },
+        {
+          "startDate": "2026-11-15T15:00:00+01:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"
+      ],
       "ocrEvidence": "Sa. 14 nov. à 18h00; Pouvoir; Dès 10 ans; Di. 15 nov. à 11h00 et 15h00; Théâtre du Passage"
     },
     {
@@ -62,12 +90,22 @@
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
       "ageText": "Dès 6 ans",
-      "tags": ["culture", "indoor", "discovery"],
-      "dates": [
-        { "startDate": "2026-11-15T14:00:00+01:00" },
-        { "startDate": "2026-11-15T17:00:00+01:00" }
+      "tags": [
+        "culture",
+        "indoor",
+        "discovery"
       ],
-      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "dates": [
+        {
+          "startDate": "2026-11-15T14:00:00+01:00"
+        },
+        {
+          "startDate": "2026-11-15T17:00:00+01:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"
+      ],
       "ocrEvidence": "Di. 15 nov. à 14h00 et 17h00; Petite balade aux enfers; Dès 6 ans; Théâtre du Passage"
     },
     {
@@ -77,12 +115,21 @@
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
       "ageText": "Dès 6 ans",
-      "tags": ["culture", "indoor"],
-      "dates": [
-        { "startDate": "2026-12-02T19:00:00+01:00" },
-        { "startDate": "2026-12-03T20:00:00+01:00" }
+      "tags": [
+        "culture",
+        "indoor"
       ],
-      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "dates": [
+        {
+          "startDate": "2026-12-02T19:00:00+01:00"
+        },
+        {
+          "startDate": "2026-12-03T20:00:00+01:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"
+      ],
       "ocrEvidence": "Me. 2 déc. à 19h00; La Noce d’Alfonse; Dès 6 ans; Je. 3 déc. à 20h00; Théâtre du Passage"
     },
     {
@@ -92,12 +139,22 @@
       "venue": "Le Pommier",
       "city": "Neuchâtel",
       "ageText": "Dès 6 ans",
-      "tags": ["culture", "indoor", "cosy"],
-      "dates": [
-        { "startDate": "2026-12-06T10:30:00+01:00" },
-        { "startDate": "2026-12-06T16:00:00+01:00" }
+      "tags": [
+        "culture",
+        "indoor",
+        "cosy"
       ],
-      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "dates": [
+        {
+          "startDate": "2026-12-06T10:30:00+01:00"
+        },
+        {
+          "startDate": "2026-12-06T16:00:00+01:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"
+      ],
       "ocrEvidence": "Di. 6 déc. à 10h30 et 16h00; Autour du feu; Dès 6 ans; Le Pommier"
     },
     {
@@ -107,12 +164,21 @@
       "venue": "Le Pommier",
       "city": "Neuchâtel",
       "ageText": "Dès 12 ans",
-      "tags": ["culture", "indoor"],
-      "dates": [
-        { "startDate": "2026-12-09T19:00:00+01:00" },
-        { "startDate": "2026-12-10T20:00:00+01:00" }
+      "tags": [
+        "culture",
+        "indoor"
       ],
-      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "dates": [
+        {
+          "startDate": "2026-12-09T19:00:00+01:00"
+        },
+        {
+          "startDate": "2026-12-10T20:00:00+01:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"
+      ],
       "ocrEvidence": "Me. 9 déc. à 19h00; La grande soirée des doublages improvisés; Dès 12 ans; Je. 10 déc. à 20h00; Le Pommier"
     },
     {
@@ -122,15 +188,290 @@
       "venue": "Théâtre du Passage",
       "city": "Neuchâtel",
       "ageText": "Dès 8 ans",
-      "tags": ["culture", "indoor"],
-      "dates": [
-        { "startDate": "2026-12-17T20:00:00+01:00" },
-        { "startDate": "2026-12-18T20:00:00+01:00" },
-        { "startDate": "2026-12-19T18:00:00+01:00" },
-        { "startDate": "2026-12-20T17:00:00+01:00" }
+      "tags": [
+        "culture",
+        "indoor"
       ],
-      "sourceFiles": ["/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"],
+      "dates": [
+        {
+          "startDate": "2026-12-17T20:00:00+01:00"
+        },
+        {
+          "startDate": "2026-12-18T20:00:00+01:00"
+        },
+        {
+          "startDate": "2026-12-19T18:00:00+01:00"
+        },
+        {
+          "startDate": "2026-12-20T17:00:00+01:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_34---c4e0446f-a029-4e10-9fc8-bdb31308659a.jpg"
+      ],
       "ocrEvidence": "Je. 17 déc. à 20h00; Fertik; Dès 8 ans; Ve. 18 déc. à 20h00; Sa. 19 déc. à 18h00; Di. 20 déc. à 17h00; Théâtre du Passage"
+    },
+    {
+      "id": "theatre-passage-retrospectaculaire-2027",
+      "status": "needs_review",
+      "title": "Rétrospectaculaire",
+      "venue": "Le Pommier",
+      "city": "Neuchâtel",
+      "ageText": "Dès 8 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [
+        {
+          "startDate": "2027-01-07T19:00:00+01:00"
+        },
+        {
+          "startDate": "2027-01-08T20:00:00+01:00"
+        },
+        {
+          "startDate": "2027-01-09T18:00:00+01:00"
+        },
+        {
+          "startDate": "2027-01-10T17:00:00+01:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
+      ],
+      "ocrEvidence": "Je. 7 jan. à 19h00; Rétrospectaculaire; Dès 8 ans; Ve. 8 jan. à 20h00; Sa. 9 jan. à 18h00; Di. 10 jan. à 17h00; Le Pommier"
+    },
+    {
+      "id": "theatre-passage-fusees-2027",
+      "status": "needs_review",
+      "title": "Fusées",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 6 ans",
+      "tags": [
+        "culture",
+        "indoor",
+        "discovery"
+      ],
+      "dates": [
+        {
+          "startDate": "2027-01-12T19:00:00+01:00"
+        },
+        {
+          "startDate": "2027-01-13T19:00:00+01:00"
+        },
+        {
+          "startDate": "2027-01-14T20:00:00+01:00"
+        },
+        {
+          "startDate": "2027-01-16T18:00:00+01:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
+      ],
+      "ocrEvidence": "Ma. 12 et Me. 13 jan. à 19h00; Je. 14 jan. à 20h00; Sa. 16 jan. à 18h00; Fusées; Dès 6 ans; Théâtre du Passage"
+    },
+    {
+      "id": "theatre-passage-opera-toute-seule-2027",
+      "status": "needs_review",
+      "title": "Puisque c’est comme ça je vais faire un opéra toute seule",
+      "venue": "Le Pommier",
+      "city": "Neuchâtel",
+      "ageText": "Dès 5 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [
+        {
+          "startDate": "2027-01-17T10:30:00+01:00"
+        },
+        {
+          "startDate": "2027-01-17T16:00:00+01:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
+      ],
+      "ocrEvidence": "Di. 17 jan. à 10h30 et 16h00; Puisque c'est comme ça je vais faire un opéra toute seule; Dès 5 ans; Le Pommier"
+    },
+    {
+      "id": "theatre-passage-a-simple-space-2027",
+      "status": "needs_review",
+      "title": "A Simple Space",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 5 ans",
+      "tags": [
+        "culture",
+        "indoor",
+        "sport"
+      ],
+      "dates": [
+        {
+          "startDate": "2027-02-08T20:00:00+01:00"
+        },
+        {
+          "startDate": "2027-02-09T20:00:00+01:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
+      ],
+      "ocrEvidence": "Lu. 8 fév. à 20h00; A Simple Space; Dès 5 ans; Ma. 9 fév. à 20h00; Théâtre du Passage"
+    },
+    {
+      "id": "theatre-passage-l-ours-kintsugi-2027",
+      "status": "needs_review",
+      "title": "L’ours Kintsugi",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 5 ans",
+      "tags": [
+        "culture",
+        "indoor",
+        "discovery"
+      ],
+      "dates": [
+        {
+          "startDate": "2027-02-14T11:00:00+01:00"
+        },
+        {
+          "startDate": "2027-02-14T17:00:00+01:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
+      ],
+      "ocrEvidence": "Di. 14 fév. à 11h00 (?) et 17h00; L’ours Kintsugi; Dès 5 ans; Théâtre du Passage",
+      "notes": "OCR incertain sur la première heure: lu comme 'ah00', probablement 11h00 à confirmer."
+    },
+    {
+      "id": "theatre-passage-lettres-au-chat-2027",
+      "status": "needs_review",
+      "title": "Lettres au chat",
+      "venue": "Le Pommier",
+      "city": "Neuchâtel",
+      "ageText": "Dès 12 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [
+        {
+          "startDate": "2027-03-09T19:00:00+01:00"
+        },
+        {
+          "startDate": "2027-03-10T19:00:00+01:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
+      ],
+      "ocrEvidence": "Ma. 9 mars à 19h00; Lettres au chat; Dès 12 ans; Me. 10 mars à 19h00; Le Pommier"
+    },
+    {
+      "id": "theatre-passage-quel-temps-2027",
+      "status": "needs_review",
+      "title": "Quel Temps!",
+      "venue": "Le Pommier",
+      "city": "Neuchâtel",
+      "ageText": "Dès 3 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
+      ],
+      "ocrEvidence": "Quel Temps!; Dès 3 ans; Le Pommier",
+      "notes": "Date non visible/suffisamment fiable sur cette photo. À compléter avec autre page ou confirmation."
+    },
+    {
+      "id": "theatre-passage-nous-ou-le-paradoxe-du-herisson-2027",
+      "status": "needs_review",
+      "title": "Nous ou le paradoxe du hérisson",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 7 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
+      ],
+      "ocrEvidence": "Nous ou le paradoxe du hérisson; Dès 7 ans; Théâtre du Passage",
+      "notes": "Date non visible/suffisamment fiable sur cette photo. À compléter avec autre page ou confirmation."
+    },
+    {
+      "id": "theatre-passage-bachibouzouk-2027",
+      "status": "needs_review",
+      "title": "Bachibouzouk",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 6 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [
+        {
+          "startDate": "2027-05-02T17:00:00+02:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
+      ],
+      "ocrEvidence": "Di. 2 mai à 17h00; Bachibouzouk; Dès 6 ans; Théâtre du Passage"
+    },
+    {
+      "id": "theatre-passage-poil-de-la-bete-2027",
+      "status": "needs_review",
+      "title": "Poil de la bête",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 3 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [
+        {
+          "startDate": "2027-05-12T19:00:00+02:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
+      ],
+      "ocrEvidence": "Me. 12 mai à 19h00; Poil de la bête; Dès 3 ans; Théâtre du Passage"
+    },
+    {
+      "id": "theatre-passage-la-tente-2027",
+      "status": "needs_review",
+      "title": "La Tente",
+      "venue": "Le Pommier",
+      "city": "Neuchâtel",
+      "ageText": "Dès 5 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [
+        {
+          "startDate": "2027-05-23T10:30:00+02:00"
+        },
+        {
+          "startDate": "2027-05-23T16:00:00+02:00"
+        }
+      ],
+      "sourceFiles": [
+        "/home/isaak/.openclaw/media/inbound/file_35---405ac7c6-ceec-49d7-9398-579ea8846c2f.jpg"
+      ],
+      "ocrEvidence": "Di. 23 mai à 10h30 et 16h00; La Tente; Dès 5 ans; Le Pommier"
     }
   ]
 }
