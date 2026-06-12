@@ -61,6 +61,10 @@ const SOURCES = {
   vallorbe: {
     url: 'https://www.vallorbe.ch/agenda?datumVon=11.06.2026&datumBis=21.06.2027',
     kind: 'iweb-communal-agenda'
+  },
+  tempsLibre: {
+    url: 'https://www.tempslibre.ch/romandie/evenements/ce-week-end',
+    kind: 'romandie-cultural-weekend-agenda'
   }
 };
 
@@ -743,6 +747,137 @@ async function scrapeVallorbe() {
   return events;
 }
 
+function tempsLibrePageUrl(page = 1) {
+  return page <= 1 ? SOURCES.tempsLibre.url : `${SOURCES.tempsLibre.url}/${page}`;
+}
+
+function extractTempsLibreListings(html, pageUrl = SOURCES.tempsLibre.url) {
+  const $ = cheerio.load(html);
+  const listings = [];
+  $('a.container-link[href]').each((_, a) => {
+    const href = $(a).attr('href') || '';
+    if (!/^\/(vaud|neuch-tel|fribourg|jura|berne-partie-fr|gen-ve|valais)\/(manifestations|juniors|festivals|concerts|expositions|spectacles)\//.test(href)) return;
+    const article = $(a).find('article').first();
+    if (!article.length) return;
+    const url = canonicalUrl(href, pageUrl);
+    const title = clean($(a).attr('title') || article.find('h3').first().text());
+    const teaser = clean(article.find('.teaser').first().text());
+    const category = clean(article.find('.categories').first().text());
+    const place = clean(article.find('.place').first().text());
+    const dateText = clean(article.find('.exergue.date').first().text());
+    const priceText = /gratuit/i.test(article.text()) ? 'Gratuit' : '';
+    if (url && title && !/sponsored/.test(url)) listings.push({ url, title, teaser, category, place, dateText, priceText });
+  });
+  return uniqBy(listings, x => x.url);
+}
+
+function parseTempsLibreDate(dateText) {
+  const t = clean(dateText);
+  const numeric = t.match(/(?:Le|Du)?\s*(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s*(?:-|au|–)\s*(\d{1,2})\.(\d{1,2})\.(\d{4}))?/i);
+  if (numeric) {
+    const start = `${numeric[3]}-${numeric[2].padStart(2, '0')}-${numeric[1].padStart(2, '0')}`;
+    const end = numeric[4] ? `${numeric[6]}-${numeric[5].padStart(2, '0')}-${numeric[4].padStart(2, '0')}` : null;
+    return { startDate: start, endDate: end };
+  }
+  const french = parseFrenchDate(t, new Date().getFullYear());
+  return { startDate: french, endDate: null };
+}
+
+function parseTempsLibreJsonLd(html) {
+  const $ = cheerio.load(html);
+  for (const el of $('script[type="application/ld+json"]').toArray()) {
+    const raw = $(el).contents().text().trim();
+    if (!raw || !raw.includes('Event')) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      const event = list.find(x => x && (x['@type'] === 'Event' || (Array.isArray(x['@type']) && x['@type'].includes('Event'))));
+      if (event) return event;
+    } catch {}
+  }
+  return null;
+}
+
+function normalizeTempsLibreDateTime(value) {
+  if (!value) return null;
+  const s = clean(String(value)).replace(' ', 'T');
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s)) return `${s.slice(0, 16)}:00+02:00`;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return null;
+}
+
+function extractTempsLibreDataLayer(html) {
+  const m = html.match(/dataLayer\.push\((\{[\s\S]*?\})\);/);
+  if (!m) return {};
+  try { return JSON.parse(m[1]); } catch { return {}; }
+}
+
+function parseTempsLibreDetail(html, listing = {}) {
+  const $ = cheerio.load(html);
+  const ld = parseTempsLibreJsonLd(html) || {};
+  const dataLayer = extractTempsLibreDataLayer(html);
+  const title = htmlToText(ld.name || $('h1').first().text() || listing.title);
+  const description = htmlToText(ld.description || $('meta[name="description"]').attr('content') || listing.teaser || $('.page h2').first().text());
+  const location = ld.location || {};
+  const address = typeof location.address === 'string' ? location.address : clean([location.address?.streetAddress, location.address?.postalCode, location.address?.addressLocality].filter(Boolean).join(' '));
+  const locationName = clean(location.name || (listing.place || '').replace(/,\s*[^,]+$/, '') || '');
+  const locationText = clean([locationName, address || listing.place].filter(Boolean).join(', '));
+  const fallbackDates = parseTempsLibreDate(listing.dateText || $('.date').first().text());
+  const text = clean($('main').text());
+  const detailPrice = /\bgratuit(?:e|s)?\b|entrée libre|accès libre/i.test(`${text} ${listing.priceText}`) ? 'Gratuit / entrée libre' : (listing.priceText || '');
+  let ageText = clean((dataLayer.public || []).join(', ') || $('span.title').filter((_, el) => /Age conseillé/i.test($(el).text())).parent().next().text());
+  if (/0\s*à\s*5\s*ans/i.test(ageText) && /6\s*à\s*12\s*ans/i.test(ageText)) ageText = '0 à 12 ans';
+  const url = clean(ld.url || $('link[rel="canonical"]').attr('href') || listing.url);
+  return normalizeEvent({
+    source: 'tempsLibre',
+    title,
+    startDate: normalizeTempsLibreDateTime(ld.startDate) || fallbackDates.startDate,
+    endDate: normalizeTempsLibreDateTime(ld.endDate) || fallbackDates.endDate,
+    locationName,
+    locationText,
+    city: cityFromLocation(`${dataLayer.city || ''} ${locationText}`, clean(dataLayer.city || '')),
+    url,
+    description,
+    priceText: detailPrice,
+    ageText,
+    tags: inferTags(`${title} ${description} ${(dataLayer.pageCategories || []).join(' ')} ${listing.category || ''}`),
+    evidence: clean(`TempsLibre ${listing.category || ''}. ${listing.dateText || ''}. ${ageText ? `Public: ${ageText}.` : ''} ${detailPrice ? `Prix: ${detailPrice}.` : ''} ${description} ${text.slice(0, 500)}`)
+  });
+}
+
+async function scrapeTempsLibre(maxPages = 3) {
+  const listings = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const url = tempsLibrePageUrl(page);
+    try {
+      const html = await fetchHtml(url, 30000);
+      const pageListings = extractTempsLibreListings(html, url);
+      if (!pageListings.length) break;
+      listings.push(...pageListings);
+    } catch (err) {
+      console.warn(`[tempsLibre] listing page ${page} failed: ${err.message}`);
+      break;
+    }
+  }
+  const events = [];
+  for (const listing of uniqBy(listings, x => x.url)) {
+    try {
+      const html = await fetchHtml(listing.url, 25000);
+      events.push(parseTempsLibreDetail(html, listing));
+    } catch (err) {
+      const dates = parseTempsLibreDate(listing.dateText);
+      events.push(normalizeEvent({
+        source: 'tempsLibre', title: listing.title, startDate: dates.startDate, endDate: dates.endDate,
+        locationText: listing.place, city: cityFromLocation(listing.place), url: listing.url,
+        description: listing.teaser, priceText: listing.priceText,
+        evidence: `TempsLibre listing fallback: ${listing.dateText} ${listing.place} ${listing.teaser}`
+      }));
+      console.warn(`[tempsLibre] detail fetch failed for ${listing.url}: ${err.message}`);
+    }
+  }
+  return uniqBy(events.filter(e => e.title && e.url), e => e.id);
+}
+
 function rejectionReason(e, window) {
   if (!e.url) return 'missing_url';
   if (!e.title || /contact|horaires d'ouverture|agenda des manifestations|accueil/i.test(e.title)) return 'navigation_or_empty_title';
@@ -1005,7 +1140,7 @@ function eventReviewQueueMarkdown(queue) {
 async function collectAll() {
   const sourceLogs = [];
   const out = [];
-  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe })) {
+  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -1085,6 +1220,13 @@ function runFixtureTests() {
   assert.strictEqual(vallorbeEvent.source, 'vallorbe');
   assert.strictEqual(vallorbeEvent.startDate, '2026-08-31T18:30:00+02:00');
   assert.strictEqual(vallorbeEvent.city, 'Vallorbe');
+  const tempsLibreListings = extractTempsLibreListings('<a class="container-link" href="/vaud/manifestations/449853-dans-la-peau-des-mangakas" title="Dans la peau des mangakas"><article><div class="exergue date"><div class="dark"><span class="day">14</span><span class="month-year">juin 2026</span></div></div><p class="categories"><strong>Ateliers</strong></p><h3>Dans la peau des mangakas</h3><p class="teaser">Atelier créatif manga</p><p class="place"><strong>Musée romain de Lausanne-Vidy</strong>, Lausanne</p><ul class="tagInfos"><li class="free">Gratuit</li></ul></article></a>', SOURCES.tempsLibre.url);
+  assert.strictEqual(tempsLibreListings.length, 1);
+  const tempsLibreEvent = parseTempsLibreDetail('<head><link rel="canonical" href="https://www.tempslibre.ch/vaud/manifestations/449853-dans-la-peau-des-mangakas"><script>window.dataLayer = window.dataLayer || []; window.dataLayer.push({"pageSection":"manifestations","pageCategories":["Manifestations","Ateliers"],"city":"Lausanne","canton":"vaud","public":["6 à 12 ans","Adolescents"]});</script><script type="application/ld+json">{"@context":"http://schema.org","@type":"Event","name":"Dans la peau des mangakas","description":"Atelier manga pour enfants","startDate":"2026-06-14 15:00","endDate":"2026-06-14 16:00","url":"https://www.tempslibre.ch/vaud/manifestations/449853-dans-la-peau-des-mangakas","location":{"@type":"Place","name":"Musée romain de Lausanne-Vidy","address":"Ch. du Bois-de-Vaux 24, Lausanne, CH"}}</script></head><main><h1>Dans la peau des mangakas</h1><p>Gratuit, réservation conseillée.</p></main>', tempsLibreListings[0]);
+  assert.strictEqual(tempsLibreEvent.source, 'tempsLibre');
+  assert.strictEqual(tempsLibreEvent.startDate, '2026-06-14T15:00:00+02:00');
+  assert.strictEqual(tempsLibreEvent.city, 'Lausanne');
+  assert(tempsLibreEvent.priceText.includes('Gratuit'), 'TempsLibre fixture should keep free evidence');
   console.log(`[TEST] fixture/date/source-probe tests passed (${fixtures.length} fixtures)`);
 }
 
@@ -1130,4 +1272,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre };
