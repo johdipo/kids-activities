@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": "manualJohan",
   "description": "Événements fournis directement par Johan (photos, affiches, PDF, texte). Les entrées OCR/incertaines restent en needs_review jusqu’à confirmation.",
-  "updatedAt": "2026-06-12T12:38:00Z",
+  "updatedAt": "2026-06-12T18:08:00Z",
   "entries": [
     {
       "id": "theatre-passage-tu-comprendras-quand-tu-seras-grand-2026",
@@ -509,5 +509,14 @@
       ],
       "ocrEvidence": "Di. 23 mai à 10h30 et 16h00; La Tente; Dès 5 ans; Le Pommier"
     }
-  ]
+  ],
+  "statusEnum": [
+    "candidate",
+    "needs_review",
+    "confirmed",
+    "archived"
+  ],
+  "procedure": "docs/manual-events-procedure.md",
+  "sourceCandidateRegistry": "data/source-candidates.json",
+  "confirmationPolicy": "Manual/OCR entries stay candidate/needs_review until an official venue/organiser source is checked; official sources override OCR details while sourceFiles keep the original provenance."
 }

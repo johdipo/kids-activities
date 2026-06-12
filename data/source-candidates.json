@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-06-12T18:05:00Z",
+  "purpose": "Prioritised nearby theatre and family/young-public sources to promote into structured scrapers when they prove parseable. URLs were web_fetch-checked on 2026-06-12; use root URLs when a guessed deep link returned 404/500.",
+  "sources": [
+    {
+      "id": "theatre-du-passage-passfamille",
+      "name": "Théâtre du Passage — Pass’famille",
+      "priority": 1,
+      "status": "structured-source-ready",
+      "url": "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille",
+      "city": "Neuchâtel",
+      "familyRelevance": "High: official family-labelled programme; already used to confirm/correct Johan OCR entries.",
+      "implementationNotes": "Prefer official dates/times from this page over OCR. Confirmed manual events may keep sourceFiles as secondary provenance.",
+      "verifiedAt": "2026-06-12T17:56:49Z"
+    },
+    {
+      "id": "le-pommier-root",
+      "name": "Le Pommier — Théâtre à Neuchâtel",
+      "priority": 2,
+      "status": "candidate-root-verified",
+      "url": "https://lepommier.ch/",
+      "city": "Neuchâtel",
+      "familyRelevance": "High: young-public menu exists and several Johan OCR entries point to Le Pommier, but guessed deep links returned 404.",
+      "implementationNotes": "Inspect homepage/menu HTML or site API before scraping; do not invent deep paths. Keep OCR-only Pommier entries in needs_review until matched officially.",
+      "verifiedAt": "2026-06-12T17:57:38Z"
+    },
+    {
+      "id": "theatre-benno-besson-jeune-public",
+      "name": "Théâtre Benno Besson — Jeune Public",
+      "priority": 3,
+      "status": "candidate-dynamic-page",
+      "url": "https://www.theatrebennobesson.ch/jeunepublic",
+      "city": "Yverdon-les-Bains",
+      "familyRelevance": "High: local Yverdon theatre with young-public page; some TBB events already appear via Infomaniak/Yverdon sources.",
+      "implementationNotes": "Wix/dynamic page; use as official verification target and investigate static payload/API before adding a scraper.",
+      "verifiedAt": "2026-06-12T17:56:49Z"
+    },
+    {
+      "id": "echandole-root",
+      "name": "L’Échandole",
+      "priority": 4,
+      "status": "candidate-root-verified",
+      "url": "https://echandole.ch/",
+      "city": "Yverdon-les-Bains",
+      "familyRelevance": "High: local Yverdon theatre; events already appear indirectly through regional/ticketing sources.",
+      "implementationNotes": "Root page verified; next step is direct programme endpoint/API discovery rather than relying only on aggregators.",
+      "verifiedAt": "2026-06-12T17:56:49Z"
+    },
+    {
+      "id": "leprogramme-root-enfants",
+      "name": "leprogramme.ch — Enfants / Vaud-Genève cultural aggregator",
+      "priority": 5,
+      "status": "candidate-root-verified",
+      "url": "https://www.leprogramme.ch/",
+      "city": "Vaud / Genève",
+      "familyRelevance": "Medium-high: root exposes an Enfants category; guessed Vaud child path returned 500 during verification.",
+      "implementationNotes": "Discover the actual stable category/filter URL from live HTML before scraper work; root only until then.",
+      "verifiedAt": "2026-06-12T17:57:29Z"
+    },
+    {
+      "id": "tempslibre-romandie-weekend",
+      "name": "TempsLibre — Romandie weekend agenda",
+      "priority": 6,
+      "status": "structured-source-active",
+      "url": "https://www.tempslibre.ch/romandie/evenements/ce-week-end",
+      "city": "Romandie",
+      "familyRelevance": "Medium: existing active scraper can surface ateliers/spectacles and is useful as dedupe/verification source.",
+      "implementationNotes": "Already integrated as tempsLibre; keep as broad aggregator, not a replacement for official theatre pages.",
+      "verifiedAt": "2026-06-12T12:35:38Z"
+    },
+    {
+      "id": "vaudfamille-root",
+      "name": "Vaudfamille",
+      "priority": 7,
+      "status": "candidate-root-verified",
+      "url": "https://www.vaudfamille.ch/",
+      "city": "Vaud",
+      "familyRelevance": "Medium: family-oriented site, but a guessed agenda path returned 404 and needs discovery before use.",
+      "implementationNotes": "Only promote after finding a stable current agenda/listing URL.",
+      "verifiedAt": "2026-06-12T17:57:29Z"
+    }
+  ]
+}

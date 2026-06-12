@@ -68,7 +68,12 @@ const SOURCES = {
   },
   manualJohan: {
     url: 'manual://johan/kids-activities',
-    kind: 'local-human-curated-source'
+    kind: 'local-human-curated-source',
+    dataFile: 'data/manual-events.json'
+  },
+  prioritizedTheatreCandidates: {
+    url: 'file://data/source-candidates.json',
+    kind: 'local-prioritized-source-candidates'
   }
 };
 
@@ -221,6 +226,12 @@ function normalizeEvent(partial) {
     city: partial.city || cityFromLocation(`${partial.locationName || ''} ${partial.locationText || ''}`, partial.source === 'grandson' ? 'Grandson' : ''),
     url: partial.url, description, ageMin: age.ageMin, ageMax: age.ageMax, ageText: age.ageText,
     priceText: clean(partial.priceText || ''), tags,
+    status: partial.status || 'confirmed',
+    confidenceStatus: partial.confidenceStatus || partial.status || 'confirmed',
+    sourceProvenance: partial.sourceProvenance || partial.provenance || '',
+    officialSources: partial.officialSources || [],
+    sourceFiles: partial.sourceFiles || [],
+    manualEntryId: partial.manualEntryId || '',
     evidence: clean(partial.evidence || partial.rawSnippet || `${partial.title} ${description}`).slice(0, 1200)
   };
   event.id = eventId(event);
@@ -256,6 +267,12 @@ function loadManualJohanEvents() {
         ageText: entry.ageText || '',
         priceText: entry.priceText || '',
         tags: entry.tags || [],
+        status: entry.status || 'candidate',
+        confidenceStatus: entry.status || 'candidate',
+        manualEntryId: entry.id || '',
+        sourceFiles: entry.sourceFiles || [],
+        officialSources: entry.officialSources || [],
+        sourceProvenance: clean([entry.source || 'Johan', ...(entry.sourceFiles || []), ...(entry.officialSources || [])].filter(Boolean).join(' | ')),
         evidence: clean([
           `Source manuelle Johan (${entry.status || 'candidate'})`,
           entry.ocrEvidence || '',
@@ -265,7 +282,29 @@ function loadManualJohanEvents() {
       }));
     }
   }
-  return { events, note: `${events.length} manual occurrence(s) loaded from ${path.relative(process.cwd(), file)}` };
+  const stats = (db.entries || []).reduce((acc, e) => {
+    acc.statusCounts[e.status || 'candidate'] = (acc.statusCounts[e.status || 'candidate'] || 0) + 1;
+    acc.entries += 1;
+    acc.occurrences += (e.dates || []).length;
+    if ((e.officialSources || []).length) acc.officiallySourced += 1;
+    return acc;
+  }, { entries: 0, occurrences: 0, officiallySourced: 0, statusCounts: {} });
+  return { events, note: `${events.length} manual occurrence(s) loaded from ${path.relative(process.cwd(), file)}`, diagnostics: stats };
+}
+
+function loadPrioritizedSourceCandidates() {
+  const file = path.join(__dirname, 'data', 'source-candidates.json');
+  if (!fs.existsSync(file)) return { events: [], note: 'source-candidates.json missing' };
+  const db = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const active = (db.sources || []).filter(s => s.status !== 'rejected');
+  return {
+    events: [],
+    note: `${active.length} prioritized local/web source candidate(s) loaded from ${path.relative(process.cwd(), file)}`,
+    diagnostics: {
+      generatedAt: db.updatedAt || null,
+      topCandidates: active.slice(0, 8).map(s => ({ id: s.id, name: s.name, status: s.status, priority: s.priority, url: s.url }))
+    }
+  };
 }
 
 function bestDetailText($, title = '') {
@@ -924,6 +963,7 @@ async function scrapeTempsLibre(maxPages = 3) {
 }
 
 function rejectionReason(e, window) {
+  if (e.source === 'manualJohan' && !['confirmed', 'verified'].includes(e.confidenceStatus || e.status || 'candidate')) return `manual_${e.confidenceStatus || e.status || 'candidate'}`;
   if (!e.url) return 'missing_url';
   if (!e.title || /contact|horaires d'ouverture|agenda des manifestations|accueil/i.test(e.title)) return 'navigation_or_empty_title';
   if (looksLikeNonEvent(e)) return 'non_event_or_administrative';
@@ -1057,8 +1097,10 @@ function interestFitDetail(e) {
 }
 
 function confidenceDetail(e) {
-  const bits = [e.url && 'URL', e.startDate && 'date', (e.locationText || e.city) && 'lieu', e.description && 'description', e.priceText && 'prix'].filter(Boolean);
-  return { score: Math.min(15, bits.length * 3), evidence: bits, reason: bits.length ? `infos présentes: ${bits.join(', ')}` : 'détails pratiques pauvres' };
+  const bits = [e.url && 'URL', e.startDate && 'date', (e.locationText || e.city) && 'lieu', e.description && 'description', e.priceText && 'prix', (e.officialSources || []).length && 'source officielle'].filter(Boolean);
+  let score = Math.min(15, bits.length * 3);
+  if (e.source === 'manualJohan' && ['candidate', 'needs_review'].includes(e.confidenceStatus || e.status)) score = Math.min(score, 6);
+  return { score, evidence: bits, status: e.confidenceStatus || e.status || 'confirmed', reason: bits.length ? `infos présentes: ${bits.join(', ')} (${e.confidenceStatus || e.status || 'confirmed'})` : 'détails pratiques pauvres' };
 }
 
 function buildFitReasons(e, d) {
@@ -1182,10 +1224,21 @@ function eventReviewQueueMarkdown(queue) {
       + `   - artifact required: \`event-reviews/${e.id}.md\`\n`).join('\n');
 }
 
+function sourceTrustPriority(e) {
+  if (e.source !== 'manualJohan') return 0;
+  if ((e.officialSources || []).length && ['confirmed', 'verified'].includes(e.confidenceStatus || e.status)) return 1;
+  if (['confirmed', 'verified'].includes(e.confidenceStatus || e.status)) return 2;
+  return 9;
+}
+
+function canonicalRecommendationPool(events) {
+  return uniqBy([...events].sort((a, b) => sourceTrustPriority(a) - sourceTrustPriority(b)), recommendationKey);
+}
+
 async function collectAll() {
   const sourceLogs = [];
   const out = [];
-  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, manualJohan: loadManualJohanEvents })) {
+  for (const [source, fn] of Object.entries({ grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -1276,6 +1329,18 @@ function runFixtureTests() {
   assert(manual.events.length >= 8, 'manualJohan source should load Johan-provided events');
   assert(manual.events.some(e => e.title === 'Tu comprendras quand tu seras grand' && e.startDate.startsWith('2026-10-25T11:00:00')), 'manualJohan should include theatre programme OCR/official entries');
   assert(manual.events.every(e => e.source === 'manualJohan' && e.url.startsWith('manual://johan/')), 'manualJohan events should have stable manual URLs');
+  assert(manual.events.some(e => e.confidenceStatus === 'confirmed' && e.officialSources.length), 'manualJohan confirmed entries should carry official-source provenance');
+  assert(manual.events.some(e => e.confidenceStatus === 'needs_review'), 'manualJohan uncertain OCR entries should remain needs_review');
+  const manualNeedsReview = manual.events.find(e => e.confidenceStatus === 'needs_review' && e.startDate);
+  assert.strictEqual(rejectionReason(manualNeedsReview, { start: manualNeedsReview.startDate.slice(0, 10), endExclusive: '2099-01-01' }), 'manual_needs_review');
+  const officialWebDuplicate = normalizeEvent({ source: 'theatreOfficialFixture', title: 'Tu comprendras quand tu seras grand', startDate: '2026-10-25T11:00:00+01:00', city: 'Neuchâtel', locationText: 'Théâtre du Passage, Neuchâtel', url: 'https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille', ageText: 'Dès 6 ans', description: 'Fixture officielle' });
+  const duplicateManual = manual.events.find(e => e.title === officialWebDuplicate.title && e.startDate === officialWebDuplicate.startDate);
+  assert.strictEqual(canonicalRecommendationPool([duplicateManual, officialWebDuplicate])[0].source, 'theatreOfficialFixture', 'official web sources should win recommendation dedupe over manual OCR/DB entries');
+  const candidates = loadPrioritizedSourceCandidates();
+  assert(candidates.diagnostics.topCandidates.some(s => /passage/i.test(s.name)), 'source candidates should include Théâtre du Passage');
+  assert(candidates.diagnostics.topCandidates.some(s => /pommier/i.test(s.name)), 'source candidates should include Le Pommier');
+  assert(candidates.diagnostics.topCandidates.some(s => /Benno Besson/i.test(s.name)), 'source candidates should include Théâtre Benno Besson');
+  assert(candidates.diagnostics.topCandidates.some(s => /Échandole|Echandole/i.test(s.name)), 'source candidates should include L’Échandole');
   console.log(`[TEST] fixture/date/source-probe tests passed (${fixtures.length} fixtures)`);
 }
 
@@ -1285,7 +1350,7 @@ async function main() {
   const window = windowArg ? (() => { const [start, endExclusive] = windowArg.split('=')[1].split(':'); return { start, endExclusive }; })() : nextWeekendWindow(new Date());
   const { events, sourceLogs } = await collectAll();
   const normalized = events.filter(e => e && e.id);
-  const recommendationPool = uniqBy(normalized, recommendationKey);
+  const recommendationPool = canonicalRecommendationPool(normalized);
   const rejected = [];
   const accepted = [];
   for (const e of recommendationPool) {
@@ -1321,4 +1386,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre };
