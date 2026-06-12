@@ -64,15 +64,25 @@ function queueAndReviewsStatus(runDir) {
   return { queue, events, reviewsDir, missing };
 }
 
+function openclawBin() {
+  if (process.env.OPENCLAW_BIN) return process.env.OPENCLAW_BIN;
+  const known = '/home/isaak/.npm-global/bin/openclaw';
+  if (fs.existsSync(known)) return known;
+  return 'openclaw';
+}
+
 function sendTelegram({ channel, target, message }) {
-  const res = spawnSync('openclaw', ['message', 'send', '--channel', channel, '--target', target, '--message', message], {
+  const res = spawnSync(openclawBin(), ['message', 'send', '--channel', channel, '--target', target, '--message', message], {
     encoding: 'utf8',
     maxBuffer: 1024 * 1024,
   });
-  if (res.status !== 0) {
-    throw new Error(`openclaw message send failed (${res.status}): ${res.stderr || res.stdout}`);
+  if (res.error) {
+    throw new Error(`openclaw message send failed before execution: ${res.error.message}`);
   }
-  return { stdout: res.stdout.trim(), stderr: res.stderr.trim() };
+  if (res.status !== 0) {
+    throw new Error(`openclaw message send failed (${res.status}${res.signal ? `/${res.signal}` : ''}): ${res.stderr || res.stdout || 'no output'}`);
+  }
+  return { stdout: (res.stdout || '').trim(), stderr: (res.stderr || '').trim() };
 }
 
 function appendLog(entry) {
@@ -85,6 +95,8 @@ function main() {
   const maxAgeHours = Number(argValue('--max-age-hours', '8'));
   const channel = argValue('--channel', DEFAULT_CHANNEL);
   const target = argValue('--target', DEFAULT_TARGET);
+  const alertChannel = argValue('--alert-channel', channel);
+  const alertTarget = argValue('--alert-target', '8589279354');
   const send = hasFlag('--send');
   const alertOnBlocker = hasFlag('--alert-on-blocker');
   const sentinelPath = path.join(runDir, 'telegram-summary-reviewed.sent.json');
@@ -138,7 +150,9 @@ function main() {
     appendLog(result);
     if (alertOnBlocker) {
       const alert = `⚠️ Résumé Activités en famille non envoyé automatiquement: ${err.message}\nArtefact: ${runDir}`;
-      try { result.alertDelivery = sendTelegram({ channel, target, message: alert }); } catch (alertErr) { result.alertError = alertErr.message; }
+      result.alertTarget = alertTarget;
+      result.alertChannel = alertChannel;
+      try { result.alertDelivery = sendTelegram({ channel: alertChannel, target: alertTarget, message: alert }); } catch (alertErr) { result.alertError = alertErr.message; }
     }
     console.error(JSON.stringify(result, null, 2));
     process.exit(1);

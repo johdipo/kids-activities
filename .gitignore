@@ -15,6 +15,7 @@ node_modules/
 # Generated run artifacts
 automation/out/
 automation/tmp/
+automation/logs/
 
 # Sensitive
 .env
