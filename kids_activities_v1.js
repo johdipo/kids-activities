@@ -66,6 +66,12 @@ const SOURCES = {
     url: 'https://www.tempslibre.ch/romandie/evenements/ce-week-end',
     kind: 'romandie-cultural-weekend-agenda'
   },
+  theatreDuPassage: {
+    url: 'https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille',
+    listUrl: 'https://www.theatredupassage.ch/accueil/liste',
+    baseUrl: 'https://www.theatredupassage.ch',
+    kind: 'official-family-theatre-agenda'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -210,7 +216,7 @@ function parseAge(ageText, text = '') {
 
 function cityFromLocation(text, fallback = '') {
   const t = clean(text);
-  for (const c of ['Yverdon-les-Bains', 'Yverdon', 'Grandson', 'Concise', 'Lausanne', 'Sainte-Croix', 'Yvonand', 'Vallorbe', 'Orbe']) {
+  for (const c of ['Yverdon-les-Bains', 'Yverdon', 'Grandson', 'Concise', 'Lausanne', 'Sainte-Croix', 'Yvonand', 'Vallorbe', 'Orbe', 'Neuchâtel', 'Neuchatel']) {
     if (new RegExp(c, 'i').test(t)) return c === 'Yverdon' ? 'Yverdon-les-Bains' : c;
   }
   return fallback;
@@ -962,6 +968,117 @@ async function scrapeTempsLibre(maxPages = 3) {
   return uniqBy(events.filter(e => e.title && e.url), e => e.id);
 }
 
+
+function lastSundayOfMonth(year, month) {
+  const d = new Date(Date.UTC(year, month, 0));
+  d.setUTCDate(d.getUTCDate() - d.getUTCDay());
+  return d.getUTCDate();
+}
+
+function zurichOffsetForDate(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) return '+02:00';
+  const year = Number(date.slice(0, 4));
+  const month = Number(date.slice(5, 7));
+  const day = Number(date.slice(8, 10));
+  if (month > 3 && month < 10) return '+02:00';
+  if (month < 3 || month > 10) return '+01:00';
+  if (month === 3) return day >= lastSundayOfMonth(year, 3) ? '+02:00' : '+01:00';
+  return day < lastSundayOfMonth(year, 10) ? '+02:00' : '+01:00';
+}
+
+function isoDateZurich(date, time = '') {
+  if (!date) return null;
+  const m = clean(time).match(/(?:^|\D)(\d{1,2})\s*[:h](\d{2})/i) || clean(time).match(/(?:^|\D)(\d{1,2})(?:\s|$)/);
+  if (!m) return date;
+  const hour = Number(m[1]);
+  if (hour > 23) return date;
+  const minute = (m[2] || '00').padStart(2, '0');
+  return `${date}T${String(hour).padStart(2, '0')}:${minute}:00${zurichOffsetForDate(date)}`;
+}
+
+function extractTheatreDuPassageDetailLinks(html, pageUrl = SOURCES.theatreDuPassage.listUrl) {
+  const $ = cheerio.load(html);
+  const links = new Map();
+  $('a[href*="/programme/detail/"]').each((_, a) => {
+    const href = $(a).attr('href');
+    const url = canonicalUrl(href, pageUrl);
+    const text = clean($(a).text());
+    const title = clean(text.replace(/^(?:LU|MA|ME|JE|VE|SA|DI)?\s*\d{1,2}(?:\s*-\s*(?:LU|MA|ME|JE|VE|SA|DI)?\s*\d{1,2})?\s+(?:JAN|FÉV|FEV|MARS|AVRIL|MAI|JUIN|JUIL|AOÛT|AOUT|SEPT|OCT|NOV|DÉC|DEC)\s*\d{2}/i, '').replace(/^(?:Famille|Théâtre|Théâtre d’ombres|Théâtre de marionnettes|Cirque|Danse|Musique|Humour|Marionnettes|[^A-ZÀ-Ÿ]{0,30})/i, ''));
+    const slugTitle = clean((href || '').split('/').pop().replace(/^\d+-/, '').replace(/-/g, ' '));
+    for (const key of [title, slugTitle]) if (key) links.set(titleKey(key), url);
+  });
+  return links;
+}
+
+function extractTheatreDuPassageFamilyListings(html) {
+  const $ = cheerio.load(html);
+  const listings = [];
+  $('input[name="evenements_dates_id[]"]').each((_, input) => {
+    const id = clean($(input).attr('value') || '');
+    const title = clean($(input).attr('aria-label') || '');
+    const rowText = clean($(input).parent().text());
+    const m = rowText.match(/-\s*(\d{1,2}\s+(?:janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)\s+\d{4})\s*-\s*(\d{1,2}:\d{2})/i);
+    const date = m ? parseFrenchDate(m[1], 2026) : null;
+    if (id && title && date) listings.push({ id, title, rowText, startDate: isoDateZurich(date, m[2]) });
+  });
+  return listings;
+}
+
+function parseTheatreDuPassageDetail(html, listing = {}) {
+  const $ = cheerio.load(html);
+  const bodyText = clean($('body').text());
+  const title = clean($('h1,h2').filter((_, el) => clean($(el).text()).toLowerCase() === (listing.title || '').toLowerCase()).first().text()) || listing.title;
+  const genre = clean($('body').text().match(/(?:Théâtre d’ombres|Théâtre de marionnettes|Famille, Théâtre|Famille|Cirque|Danse|Théâtre)/i)?.[0] || 'Famille / théâtre');
+  const duration = clean((bodyText.match(/Durée\s*([^Â]+?)(?:Âge|Lieu|Par le|$)/i) || [])[1] || '');
+  const ageText = clean((bodyText.match(/Âge\s*([^L]+?)(?:Lieu|Par le|$)/i) || [])[1] || 'Famille');
+  const venue = clean((bodyText.match(/Lieu\s*([^P]+?)(?:Par le|Quitter|\w+ la vie|$)/i) || [])[1] || 'Théâtre du Passage');
+  const description = clean((bodyText.split(venue).pop() || bodyText).replace(/Texte et mise en scène.*$/i, '').slice(0, 1200));
+  const priceText = clean(bodyText.match(/Tarif plein\s*\d+\.-\s*Tarif réduit\s*\d+\.-\s*Tarif enfant\s*\d+\.-/i)?.[0] || 'Pass’famille: enfant 10.–, adulte -30%; tarifs page détail disponibles');
+  return normalizeEvent({
+    source: 'theatreDuPassage',
+    title,
+    startDate: listing.startDate,
+    locationName: 'Théâtre du Passage',
+    locationText: `Théâtre du Passage, ${venue}, Passage Maximilien-de-Meuron 4, 2000 Neuchâtel`,
+    city: 'Neuchâtel',
+    url: listing.url || SOURCES.theatreDuPassage.url,
+    description: clean(`${genre}. ${duration ? `Durée ${duration}. ` : ''}${description}`),
+    ageText,
+    priceText,
+    tags: inferTags(`${title} ${genre} ${description} famille enfants théâtre marionnettes`),
+    evidence: clean(`Pass’famille officiel. ${listing.rowText || ''}. ${ageText ? `Âge: ${ageText}.` : ''} ${duration ? `Durée: ${duration}.` : ''} ${priceText}`)
+  });
+}
+
+async function scrapeTheatreDuPassage() {
+  const [familyHtml, listHtml] = await Promise.all([
+    fetchHtml(SOURCES.theatreDuPassage.url, 30000),
+    fetchHtml(SOURCES.theatreDuPassage.listUrl, 30000).catch(() => '')
+  ]);
+  const detailLinks = extractTheatreDuPassageDetailLinks(listHtml);
+  const listings = extractTheatreDuPassageFamilyListings(familyHtml).map(item => ({
+    ...item,
+    url: detailLinks.get(titleKey(item.title)) || `${SOURCES.theatreDuPassage.url}#event-${item.id}`
+  }));
+  const events = [];
+  const detailCache = new Map();
+  for (const listing of listings) {
+    try {
+      if (!detailCache.has(listing.url) && /\/programme\/detail\//.test(listing.url)) detailCache.set(listing.url, await fetchHtml(listing.url, 25000));
+      const detailHtml = detailCache.get(listing.url) || familyHtml;
+      events.push(parseTheatreDuPassageDetail(detailHtml, listing));
+    } catch (err) {
+      events.push(normalizeEvent({
+        source: 'theatreDuPassage', title: listing.title, startDate: listing.startDate,
+        locationName: 'Théâtre du Passage', locationText: 'Théâtre du Passage, Passage Maximilien-de-Meuron 4, 2000 Neuchâtel', city: 'Neuchâtel',
+        url: listing.url, description: 'Spectacle estampillé Pass’famille au Théâtre du Passage.', ageText: 'Famille',
+        priceText: 'Pass’famille: enfant 10.–, adulte -30%', evidence: `Pass’famille listing fallback: ${listing.rowText}`
+      }));
+    }
+  }
+  return uniqBy(events.filter(e => e.title && e.startDate), e => e.id);
+}
+
 function rejectionReason(e, window) {
   if (e.source === 'manualJohan' && !['confirmed', 'verified'].includes(e.confidenceStatus || e.status || 'candidate')) return `manual_${e.confidenceStatus || e.status || 'candidate'}`;
   if (!e.url) return 'missing_url';
@@ -1242,7 +1359,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -1329,6 +1446,14 @@ function runFixtureTests() {
   assert.strictEqual(tempsLibreEvent.startDate, '2026-06-14T15:00:00+02:00');
   assert.strictEqual(tempsLibreEvent.city, 'Lausanne');
   assert(tempsLibreEvent.priceText.includes('Gratuit'), 'TempsLibre fixture should keep free evidence');
+  const theatreRows = extractTheatreDuPassageFamilyListings('<main><p><input aria-label="Tu comprendras quand tu seras grand" type="checkbox" name="evenements_dates_id[]" value="355"> Tu comprendras quand tu seras grand - 25 octobre 2026 - 11:00</p></main>');
+  assert.strictEqual(theatreRows.length, 1);
+  assert.strictEqual(theatreRows[0].startDate, '2026-10-25T11:00:00+01:00');
+  const theatreEvent = parseTheatreDuPassageDetail('<body>Tarif plein35.-Tarif réduit25.-Tarif enfant10.- Théâtre d’ombres Tu comprendras quand tu seras grand Date DI 25 OCT 2026 11:00, 17:00 Durée 50 min Âge Dès 6 ans Lieu Grande salle Par le Théâtre des Marionnettes de Genève Une aventure drôle et tendre.</body>', { ...theatreRows[0], url: 'https://www.theatredupassage.ch/programme/detail/162-tu-comprendras-quand-tu-seras-grand' });
+  assert.strictEqual(theatreEvent.source, 'theatreDuPassage');
+  assert.strictEqual(theatreEvent.city, 'Neuchâtel');
+  assert.strictEqual(theatreEvent.ageText, 'Dès 6 ans');
+  assert(theatreEvent.priceText.includes('Tarif enfant'), 'Théâtre du Passage fixture should keep price evidence');
   const manual = loadManualJohanEvents();
   assert(manual.events.length >= 8, 'manualJohan source should load Johan-provided events');
   assert(manual.events.some(e => e.title === 'Tu comprendras quand tu seras grand' && e.startDate.startsWith('2026-10-25T11:00:00')), 'manualJohan should include theatre programme OCR/official entries');
@@ -1390,4 +1515,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage };
