@@ -72,6 +72,11 @@ const SOURCES = {
     baseUrl: 'https://www.theatredupassage.ch',
     kind: 'official-family-theatre-agenda'
   },
+  lePommier: {
+    url: 'https://lepommier.ch/event/?type=SmV1bmUgcHVibGlj',
+    baseUrl: 'https://lepommier.ch',
+    kind: 'official-young-audience-theatre-agenda'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -206,11 +211,11 @@ function inferTags(text) {
 
 function parseAge(ageText, text = '') {
   const s = clean(`${ageText} ${text}`).toLowerCase();
-  if (/tout public|famille|enfants?|dès la naissance|n[ée] pour lire/.test(s)) return { ageMin: null, ageMax: null, ageText: ageText || 'tout public / famille' };
   const range = s.match(/(\d{1,2})\s*(?:-|à|a)\s*(\d{1,2})\s*ans/);
   if (range) return { ageMin: +range[1], ageMax: +range[2], ageText: ageText || range[0] };
   const min = s.match(/d[èe]s\s*(\d{1,2})\s*ans|à partir de\s*(\d{1,2})\s*ans/);
   if (min) return { ageMin: +(min[1] || min[2]), ageMax: null, ageText: ageText || min[0] };
+  if (/tout public|famille|enfants?|dès la naissance|n[ée] pour lire/.test(s)) return { ageMin: null, ageMax: null, ageText: ageText || 'tout public / famille' };
   return { ageMin: null, ageMax: null, ageText: ageText || '' };
 }
 
@@ -996,6 +1001,91 @@ function isoDateZurich(date, time = '') {
   return `${date}T${String(hour).padStart(2, '0')}:${minute}:00${zurichOffsetForDate(date)}`;
 }
 
+
+function extractLePommierListings(html, pageUrl = SOURCES.lePommier.url) {
+  const $ = cheerio.load(html);
+  const listings = [];
+  $('.eventv2-grid a.grid-item[href], .eventv2-grid-wrapper a.grid-item[href]').each((_, a) => {
+    const $a = $(a);
+    const url = canonicalUrl($a.attr('href'), pageUrl);
+    if (!url || !/\/event\/\d+/.test(url)) return;
+    const title = clean($a.find('.content').attr('title') || $a.attr('title') || $a.find('.title').text() || $a.find('.contentWrapper').children().last().text());
+    const dateText = clean($a.find('.date').first().text());
+    const typeText = clean($a.find('.type').first().text() || $a.find('.band').first().text());
+    const epoch = Number($a.attr('data-date'));
+    const startDate = Number.isFinite(epoch) && epoch > 0 ? new Date(epoch * 1000).toISOString().slice(0, 10) : isoDate(parseFrenchDate(dateText, 2027), dateText);
+    if (!title) return;
+    listings.push({ title, url, dateText, typeText, startDate });
+  });
+  return uniqBy(listings, x => x.url);
+}
+
+function lePommierInfoValue(text, label, nextLabels = []) {
+  const labels = [label, ...nextLabels].map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const stop = labels.slice(1).join('|') || 'Billetterie|Les horaires et tarifs';
+  const re = new RegExp(`${labels[0]}\\s+(.+?)(?=\\s+(?:${stop})\\s+|$)`, 'i');
+  const m = clean(text).match(re);
+  return m ? clean(m[1]) : '';
+}
+
+function parseLePommierDetail(html, listing = {}) {
+  const $ = cheerio.load(html);
+  const pageText = clean($('body').text());
+  const title = clean(listing.title || $('h1').first().text().replace(/^(?:Le|Du)\s+\d{1,2}\s+\S+\.?\s+(?:au\s+\d{1,2}\s+\S+\.?\s+)?/i, '').replace(/\s+(Théâtre|Impro|Musique|Danse|Festival d'impro)$/i, '') || $('title').text().replace(/- Le Pommier.*/i, ''));
+  const url = listing.url || $('link[rel="canonical"]').attr('href') || SOURCES.lePommier.url;
+  const ageText = lePommierInfoValue(pageText, 'Age conseillé', ['Durée', 'Made in', 'Lieu']);
+  const duration = lePommierInfoValue(pageText, 'Durée', ['Made in', 'Lieu']);
+  const locationBlock = lePommierInfoValue(pageText, 'Lieu', ['Billetterie']);
+  const genre = lePommierInfoValue(pageText, 'Genre', ["Type d'événement", 'Age conseillé', 'Durée']);
+  const eventType = lePommierInfoValue(pageText, "Type d'événement", ['Age conseillé', 'Durée']);
+  const descMatch = pageText.match(/Billetterie\s+(.+?)\s+Les horaires et tarifs\s+/i);
+  const description = clean([descMatch?.[1] || '', duration ? `Durée: ${duration}` : '', genre || '', eventType || ''].filter(Boolean).join(' | '));
+  const tariffMatch = pageText.match(/Les horaires et tarifs\s+(.+?)(?=\s+Distribution\s+|\s+Soutiens et production\s+|\s+Teaser\s+|\s+Cela pourrait vous intéresser\s+|$)/i);
+  const tariffText = clean(tariffMatch?.[1] || '');
+  const priceText = clean((tariffText.match(/(?:Jeune public\s+)?(?:Tarif|Ecole|École|Abonnement|AG Culturel|gratuit).+/i) || [tariffText]).at(0));
+  const occurrences = [];
+  const dateLineRe = new RegExp(`(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\\s+\\d{1,2}\\s+(?:${MONTH_RE})\\.?\\s+\\d{4}\\s+à\\s+\\d{1,2}\\s*h(?:\\s*\\d{2})?`, 'gi');
+  for (const m of tariffText.matchAll(dateLineRe)) {
+    const line = clean(m[0]);
+    const date = parseFrenchDate(line, 2027);
+    if (date) occurrences.push({ line, startDate: isoDate(date, line) });
+  }
+  if (!occurrences.length && listing.startDate) occurrences.push({ line: listing.dateText || listing.startDate, startDate: listing.startDate });
+  return occurrences.map(occ => normalizeEvent({
+    source: 'lePommier',
+    title,
+    startDate: occ.startDate,
+    endDate: null,
+    locationName: 'Le Pommier',
+    locationText: locationBlock || 'Le Pommier, Rue du Pommier 9, 2000 Neuchâtel',
+    city: 'Neuchâtel',
+    url,
+    description,
+    ageText,
+    priceText,
+    tags: ['culture', 'indoor'],
+    sourceProvenance: `Le Pommier saison jeune public (${listing.dateText || occ.line})`,
+    officialSources: [url],
+    evidence: clean([listing.typeText, eventType, ageText, duration, occ.line, priceText, description].filter(Boolean).join(' | '))
+  }));
+}
+
+async function scrapeLePommier() {
+  const html = await fetchHtml(SOURCES.lePommier.url, 30000);
+  const listings = extractLePommierListings(html, SOURCES.lePommier.url);
+  const events = [];
+  for (const listing of listings) {
+    try {
+      const detailHtml = await fetchHtml(listing.url, 30000);
+      events.push(...parseLePommierDetail(detailHtml, listing));
+    } catch (err) {
+      console.warn(`[lePommier] detail fetch failed for ${listing.url}: ${err.message}`);
+      events.push(...parseLePommierDetail('', listing));
+    }
+  }
+  return { events: uniqBy(events, e => e.id), note: `${events.length} Le Pommier young-audience occurrence(s) from ${listings.length} listing(s)` };
+}
+
 function extractTheatreDuPassageDetailLinks(html, pageUrl = SOURCES.theatreDuPassage.listUrl) {
   const $ = cheerio.load(html);
   const links = new Map();
@@ -1359,7 +1449,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -1454,6 +1544,14 @@ function runFixtureTests() {
   assert.strictEqual(theatreEvent.city, 'Neuchâtel');
   assert.strictEqual(theatreEvent.ageText, 'Dès 6 ans');
   assert(theatreEvent.priceText.includes('Tarif enfant'), 'Théâtre du Passage fixture should keep price evidence');
+  const lePommierListings = extractLePommierListings('<div class="eventv2-grid"><a href="https://lepommier.ch/event/981-puisque-cest-comme-ca-je-vais-faire-un-opera-toute-seule" class="grid-item" data-date="1800144000"><div class="content" title="Puisque c’est comme ça je vais faire un opéra toute seule"><div class="date">Le 17 Jan.</div><div class="type">Théâtre</div></div></a></div>', SOURCES.lePommier.url);
+  assert.strictEqual(lePommierListings.length, 1);
+  const lePommierEvents = parseLePommierDetail('<main><h1>Puisque c’est comme ça je vais faire un opéra toute seule</h1><p>Informations Auteur / Autrice Claire Diterzi Genre Théâtre Type d\'événement Jeune public Age conseillé Dès 5 ans Durée 45 minutes Made in France Lieu Le Pommier Rue du Pommier 9 2000 Neuchâtel Billetterie Opéra Mode d’emploi (pour toute la famille) Les horaires et tarifs Dimanche 17 janvier 2027 à 10 h 30 Dimanche 17 janvier 2027 à 16 h 00 Jeune public Tarif unique : 15 CHF Abonnement de saison, découverte et jeune public : gratuit Distribution</p></main>', lePommierListings[0]);
+  assert.strictEqual(lePommierEvents.length, 2);
+  assert.strictEqual(lePommierEvents[0].source, 'lePommier');
+  assert.strictEqual(lePommierEvents[0].startDate, '2027-01-17T10:30:00+02:00');
+  assert.strictEqual(lePommierEvents[0].ageMin, 5);
+  assert(lePommierEvents[0].priceText.includes('15 CHF'), 'Le Pommier fixture should keep tariff evidence');
   const manual = loadManualJohanEvents();
   assert(manual.events.length >= 8, 'manualJohan source should load Johan-provided events');
   assert(manual.events.some(e => e.title === 'Tu comprendras quand tu seras grand' && e.startDate.startsWith('2026-10-25T11:00:00')), 'manualJohan should include theatre programme OCR/official entries');
@@ -1515,4 +1613,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
