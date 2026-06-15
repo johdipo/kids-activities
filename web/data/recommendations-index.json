@@ -1,0 +1,1179 @@
+{
+  "schemaVersion": "1.0",
+  "app": {
+    "title": "Kids Activities — pilote",
+    "subtitle": "Idées famille pour le week-end, vérifiées à la main",
+    "region": "Yverdon-les-Bains & alentours",
+    "disclaimer": "Sélection vérifiée manuellement à partir des pages sources. À recontrôler avant de partir (météo, réservation, horaires)."
+  },
+  "generatedAt": "2026-06-15T20:03:43.447Z",
+  "today": "2026-06-15",
+  "freshness": {
+    "latestRunId": "v02-2026-06-15T16-06-35-244Z",
+    "latestRunAt": "2026-06-15T16:06:35.244Z",
+    "reviewedRunsExported": 4,
+    "windowsCovered": [
+      "2026-06-20",
+      "2026-06-13",
+      "2026-06-06",
+      "2026-05-23"
+    ]
+  },
+  "upcoming": {
+    "runId": "v02-2026-06-15T16-06-35-244Z",
+    "generatedAt": "2026-06-15T16:06:35.244Z",
+    "window": {
+      "start": "2026-06-20",
+      "endExclusive": "2026-06-22"
+    },
+    "counts": {
+      "total": 5,
+      "recommended": 1,
+      "secondary": 3,
+      "rejected": 1
+    },
+    "sources": [
+      {
+        "source": "Saisie manuelle (sources officielles)",
+        "status": "ok",
+        "count": 37
+      },
+      {
+        "source": "PrioritizedTheatreCandidates",
+        "status": "ok",
+        "count": 0
+      },
+      {
+        "source": "Grandson",
+        "status": "ok",
+        "count": 370
+      },
+      {
+        "source": "Yverdon-les-Bains",
+        "status": "ok",
+        "count": 77
+      },
+      {
+        "source": "InfomaniakYverdon",
+        "status": "ok",
+        "count": 11
+      },
+      {
+        "source": "AgendaCh",
+        "status": "ok",
+        "count": 0
+      },
+      {
+        "source": "LaDerivee",
+        "status": "ok",
+        "count": 182
+      },
+      {
+        "source": "Orbe",
+        "status": "ok",
+        "count": 47
+      },
+      {
+        "source": "Vallorbe",
+        "status": "ok",
+        "count": 7
+      },
+      {
+        "source": "Temps Libre",
+        "status": "ok",
+        "count": 35
+      },
+      {
+        "source": "TheatreDuPassage",
+        "status": "ok",
+        "count": 21
+      },
+      {
+        "source": "LePommier",
+        "status": "ok",
+        "count": 8
+      },
+      {
+        "source": "TheatreBennoBesson",
+        "status": "ok",
+        "count": 11
+      }
+    ],
+    "activities": [
+      {
+        "id": "la-derivee-c0045ad4140f",
+        "title": "Brunch musical",
+        "sourceKey": "la-derivee",
+        "sourceLabel": "La Dérivée (Yverdon)",
+        "url": "https://www.laderivee.ch/event/brunch-musical",
+        "location": "La Dérivée, Quai de Nogent, Yverdon-les-Bains",
+        "city": "Yverdon-les-Bains",
+        "startDate": "2026-06-21T09:30:00+02:00",
+        "endDate": "2026-06-21",
+        "ageText": "",
+        "priceText": "Gratuit / buvette estivale (site: centre culturel estival gratuit)",
+        "tags": [
+          "outdoor",
+          "culture",
+          "water"
+        ],
+        "description": "par le Café Primeur — DJ set FMY & brunch Inscription brunch : directement auprès du Café primeur : 024.425.93.91 en collaboration avec laFMY(Fête de la Musique d’Yverdon-les-Bains)",
+        "verdict": "recommended",
+        "verdictLabel": "Recommandé",
+        "verdictRank": 3,
+        "confidenceStatus": "confirmed",
+        "score": 94,
+        "scoreLabel": "recommandé",
+        "summary": "Brunch musical — dimanche 21 juin 09h30–12h à La Dérivée : chouette option locale en plein air avec brunch + DJ set, mais il faut appeler le Café Primeur pour réserver et confirmer le prix du brunch.",
+        "reasons": [
+          "Lennon: plein air ; Andy: culture, eau ; Daisy: culture ; Johan: plein air, culture",
+          "très proche d’Yverdon",
+          "tombe le week-end ciblé"
+        ],
+        "caveats": [
+          "âge non précisé",
+          "inscription/réservation à vérifier"
+        ],
+        "officialSources": [],
+        "provenanceNote": ""
+      },
+      {
+        "id": "la-derivee-db70d2dee4b7",
+        "title": "LA FRISQUE ÉQUIPE",
+        "sourceKey": "la-derivee",
+        "sourceLabel": "La Dérivée (Yverdon)",
+        "url": "https://www.laderivee.ch/event/la-frisque-equipe",
+        "location": "La Dérivée, Quai de Nogent, Yverdon-les-Bains",
+        "city": "Yverdon-les-Bains",
+        "startDate": "2026-06-20T20:30:00+02:00",
+        "endDate": "2026-06-20",
+        "ageText": "famille / enfants mentionnés",
+        "priceText": "Gratuit / buvette estivale (site: centre culturel estival gratuit)",
+        "tags": [
+          "water",
+          "discovery",
+          "outdoor",
+          "culture"
+        ],
+        "description": "Chanson rigolotes — Née en 2020 dans un salon, la frisque équipe est un duo biennois aussi déjanté qu’attachant. Leurs chansons s’adressent aussi bien aux enfants qu’aux adultes, avec un ton léger, drôle et décomplexé. Sur scène, les musiciens assument les petits ratés qui donnent lieu à de joyeux moments de solitude.…",
+        "verdict": "secondary",
+        "verdictLabel": "Option secondaire",
+        "verdictRank": 2,
+        "confidenceStatus": "confirmed",
+        "score": 96,
+        "scoreLabel": "recommandé",
+        "summary": "🎶 LA FRISQUE ÉQUIPE — concert gratuit et drôle à La Dérivée, clairement pensé aussi pour les enfants, mais à 20h30: chouette option si les filles tiennent le soir, pas mon top avec Lennon.",
+        "reasons": [
+          "Lennon: plein air, découverte ; Andy: culture, eau, découverte ; Daisy: culture ; Johan: plein air, culture",
+          "très proche d’Yverdon",
+          "tombe le week-end ciblé"
+        ],
+        "caveats": [
+          "Gratuit / buvette estivale (site: centre culturel estival gratuit)"
+        ],
+        "officialSources": [],
+        "provenanceNote": ""
+      },
+      {
+        "id": "la-derivee-95adcf90552e",
+        "title": "MoKa",
+        "sourceKey": "la-derivee",
+        "sourceLabel": "La Dérivée (Yverdon)",
+        "url": "https://www.laderivee.ch/event/mo-ka",
+        "location": "La Dérivée, Quai de Nogent, Yverdon-les-Bains",
+        "city": "Yverdon-les-Bains",
+        "startDate": "2026-06-21T07:30:00+02:00",
+        "endDate": "2026-06-21",
+        "ageText": "",
+        "priceText": "Gratuit / buvette estivale (site: centre culturel estival gratuit)",
+        "tags": [
+          "culture",
+          "sport",
+          "outdoor",
+          "water"
+        ],
+        "description": "Rap français mélodique / Afrobeat / R&B contemporain / Trap et électrobass — MoKa est une DJ dont le nom, fusion de ses prénoms et clin d’œil à ses origines, incarne l’esprit de ses sets : un dialogue entre cultures et influences. À travers ses mix, MoKa explore les liens entre rap français mélodique, afrobeat, R&B co…",
+        "verdict": "secondary",
+        "verdictLabel": "Option secondaire",
+        "verdictRank": 2,
+        "confidenceStatus": "confirmed",
+        "score": 96,
+        "scoreLabel": "recommandé",
+        "summary": "🎧 MoKa — dimanche 21 juin 07h30–09h30 à La Dérivée : DJ set gratuit au bord de l’eau, sympa si vous êtes déjà debout et motivés, mais pas vraiment une activité enfants.",
+        "reasons": [
+          "Lennon: plein air ; Andy: culture, sport, eau ; Daisy: culture ; Johan: sport, plein air, culture",
+          "très proche d’Yverdon",
+          "tombe le week-end ciblé"
+        ],
+        "caveats": [
+          "âge non précisé"
+        ],
+        "officialSources": [],
+        "provenanceNote": ""
+      },
+      {
+        "id": "la-derivee-b9e7179ddfc5",
+        "title": "Quatuor Non Troppo",
+        "sourceKey": "la-derivee",
+        "sourceLabel": "La Dérivée (Yverdon)",
+        "url": "https://www.laderivee.ch/event/quatuor-non-troppo",
+        "location": "La Dérivée, Quai de Nogent, Yverdon-les-Bains",
+        "city": "Yverdon-les-Bains",
+        "startDate": "2026-06-21T18:00:00+02:00",
+        "endDate": "2026-06-21",
+        "ageText": "",
+        "priceText": "Gratuit / buvette estivale (site: centre culturel estival gratuit)",
+        "tags": [
+          "outdoor",
+          "walk",
+          "culture",
+          "water"
+        ],
+        "description": "Balades folk et traditionnelles — Le « Quatuor Non Troppo » s’est constitué en 2024 à l'occasion d'un concert à l’Echandole. Dominique distille des trilles exaltées à la flûte traversière. Elle prodigue ses enseignements dans la région et respire la musique. Ses influences sont plutôt à chercher du côté du classique m…",
+        "verdict": "secondary",
+        "verdictLabel": "Option secondaire",
+        "verdictRank": 2,
+        "confidenceStatus": "confirmed",
+        "score": 94,
+        "scoreLabel": "recommandé",
+        "summary": "🎻 Quatuor Non Troppo — dimanche 21 juin 18h–19h à La Dérivée : concert folk/trad gratuit et facile d’accès, agréable en mode balade + buvette, mais pas une activité spécifiquement enfants.",
+        "reasons": [
+          "Lennon: plein air ; Andy: culture, eau ; Daisy: balade, culture ; Johan: plein air, culture",
+          "très proche d’Yverdon",
+          "tombe le week-end ciblé"
+        ],
+        "caveats": [
+          "âge non précisé"
+        ],
+        "officialSources": [],
+        "provenanceNote": ""
+      },
+      {
+        "id": "la-derivee-564b533dc8a4",
+        "title": "Masculinismes : dérives médicales et mythes",
+        "sourceKey": "la-derivee",
+        "sourceLabel": "La Dérivée (Yverdon)",
+        "url": "https://www.laderivee.ch/event/thematique-masculinisme-derives-medicales-et-mythes",
+        "location": "La Dérivée, Quai de Nogent, Yverdon-les-Bains",
+        "city": "Yverdon-les-Bains",
+        "startDate": "2026-06-20T14:00:00+02:00",
+        "endDate": "2026-06-20",
+        "ageText": "",
+        "priceText": "Gratuit / buvette estivale (site: centre culturel estival gratuit)",
+        "tags": [
+          "food",
+          "cosy",
+          "outdoor",
+          "culture",
+          "water"
+        ],
+        "description": "par CASE2SANTE — Avec les apports deGilles Crettenand, responsable programme MenCare Suisse romande (coordinateur MenCare, association maenner.ch) pour les angles genres et société et de Dre Thérèse Bouthors, endocrinologue pour les angles scientifique et médical, nous échangerons et réfléchirons ensemble à l'essor de…",
+        "verdict": "rejected",
+        "verdictLabel": "Écarté après vérification",
+        "verdictRank": 1,
+        "confidenceStatus": "confirmed",
+        "score": 94,
+        "scoreLabel": "recommandé",
+        "summary": "❌ La Dérivée — « Masculinismes : dérives médicales et mythes » : discussion adulte/santé-société, pas adaptée comme sortie famille avec enfants malgré le lieu sympa.",
+        "reasons": [
+          "Lennon: plein air ; Andy: culture, eau, food/cuisine ; Daisy: cosy, culture, food/cuisine ; Johan: plein air, culture, food/cuisine",
+          "très proche d’Yverdon",
+          "tombe le week-end ciblé"
+        ],
+        "caveats": [
+          "âge non précisé"
+        ],
+        "officialSources": [],
+        "provenanceNote": ""
+      }
+    ]
+  },
+  "past": [
+    {
+      "runId": "v02-2026-06-11T16-05-29-220Z",
+      "generatedAt": "2026-06-11T16:05:29.220Z",
+      "window": {
+        "start": "2026-06-13",
+        "endExclusive": "2026-06-15"
+      },
+      "counts": {
+        "total": 5,
+        "recommended": 1,
+        "secondary": 2,
+        "rejected": 2
+      },
+      "sources": [
+        {
+          "source": "Grandson",
+          "status": "ok",
+          "count": 390
+        },
+        {
+          "source": "Yverdon-les-Bains",
+          "status": "ok",
+          "count": 52
+        },
+        {
+          "source": "InfomaniakYverdon",
+          "status": "ok",
+          "count": 11
+        },
+        {
+          "source": "AgendaCh",
+          "status": "ok",
+          "count": 0
+        },
+        {
+          "source": "LaDerivee",
+          "status": "ok",
+          "count": 182
+        },
+        {
+          "source": "Orbe",
+          "status": "ok",
+          "count": 46
+        },
+        {
+          "source": "Vallorbe",
+          "status": "ok",
+          "count": 7
+        }
+      ],
+      "activities": [
+        {
+          "id": "la-derivee-a51a597b8ddd",
+          "title": "Atelier à la découverte de la nature",
+          "sourceKey": "la-derivee",
+          "sourceLabel": "La Dérivée (Yverdon)",
+          "url": "https://www.laderivee.ch/event/atelier-a-la-decouverte-de-la-nature",
+          "location": "La Dérivée, Quai de Nogent, Yverdon-les-Bains",
+          "city": "Yverdon-les-Bains",
+          "startDate": "2026-06-13T18:00:00+02:00",
+          "endDate": "2026-06-13",
+          "ageText": "famille / enfants mentionnés",
+          "priceText": "Gratuit / buvette estivale (site: centre culturel estival gratuit)",
+          "tags": [
+            "nature",
+            "science",
+            "discovery",
+            "outdoor",
+            "culture",
+            "water"
+          ],
+          "description": "par le COSNY avec Michael Eray — Le COSNY (Cercle ornithologique et de sciences naturelles d’Yverdon-les -Bains) a été fondé en 1968 par des passionnés d’ornithologie et de botanique de la région.Engagé dans la protection de l’environnement à l’échelle locale, l'association œuvre à sensibiliser le public à la nature e…",
+          "verdict": "recommended",
+          "verdictLabel": "Recommandé",
+          "verdictRank": 3,
+          "confidenceStatus": "",
+          "score": 96,
+          "scoreLabel": "recommandé",
+          "summary": "🌿 Atelier nature à La Dérivée, samedi 13 juin 18h–20h: très proche et gratuit, bon fit famille/nature, mais âge non précisé et horaire un peu tardif pour Lennon.",
+          "reasons": [
+            "Lennon: nature, plein air, découverte ; Andy: science, culture, eau ; Daisy: culture ; Johan: plein air, nature, science",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "Gratuit / buvette estivale (site: centre culturel estival gratuit)"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        },
+        {
+          "id": "la-derivee-f8de411c0211",
+          "title": "Atelier arbredoux",
+          "sourceKey": "la-derivee",
+          "sourceLabel": "La Dérivée (Yverdon)",
+          "url": "https://www.laderivee.ch/event/atelier-arbredoux",
+          "location": "La Dérivée, Quai de Nogent, Yverdon-les-Bains",
+          "city": "Yverdon-les-Bains",
+          "startDate": "2026-06-14",
+          "endDate": "2026-06-14",
+          "ageText": "famille / enfants mentionnés",
+          "priceText": "Gratuit / buvette estivale (site: centre culturel estival gratuit)",
+          "tags": [
+            "nature",
+            "outdoor",
+            "culture",
+            "science",
+            "cosy",
+            "indoor",
+            "discovery",
+            "water"
+          ],
+          "description": "par Atelier Arbredoux — J’organise, bricole, utilise l’art dans le quotidien. Actuellement sur mandat et à l’atelier Poisson Pilote ou à Arbredoux, je crée des évènements où il fait bon vivre avec des techniques multiples que j’acquière aux files du temps à travers des cours et stages suivis dans différentes structure…",
+          "verdict": "secondary",
+          "verdictLabel": "Option secondaire",
+          "verdictRank": 2,
+          "confidenceStatus": "",
+          "score": 96,
+          "scoreLabel": "recommandé",
+          "summary": "Atelier Arbredoux — dim. 14 juin, 15h–17h à La Dérivée (Quai de Nogent) : atelier créatif gratuit et probablement sympa en famille, mais à garder en plan B car la page ne précise ni âge, ni inscription, ni activité concrète pour enfants.",
+          "reasons": [
+            "Lennon: nature, plein air, découverte ; Andy: science, culture, eau ; Daisy: cosy, culture, intérieur ; Johan: plein air, nature, science",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "Gratuit / buvette estivale (site: centre culturel estival gratuit)"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        },
+        {
+          "id": "la-derivee-b268e416397f",
+          "title": "Energie durabilité",
+          "sourceKey": "la-derivee",
+          "sourceLabel": "La Dérivée (Yverdon)",
+          "url": "https://www.laderivee.ch/event/energie-durabilite",
+          "location": "La Dérivée, Quai de Nogent, Yverdon-les-Bains",
+          "city": "Yverdon-les-Bains",
+          "startDate": "2026-06-14T17:00:00+02:00",
+          "endDate": "2026-06-14",
+          "ageText": "",
+          "priceText": "Gratuit / buvette estivale (site: centre culturel estival gratuit)",
+          "tags": [
+            "nature",
+            "outdoor",
+            "culture",
+            "water"
+          ],
+          "description": "Discussion — On parle souvent de blackout, de pénurie d'énergie, de décarbonisation de nos activités.Qu'est-ce que l'énergie ? Quels sont les défis et les solutions dans le sens d'une société plus durable ?JF Affolter, prof. retraité de la HEIG-VD partagera son expérience dans les énergies renouvelables (ou non) et le…",
+          "verdict": "secondary",
+          "verdictLabel": "Option secondaire",
+          "verdictRank": 2,
+          "confidenceStatus": "",
+          "score": 96,
+          "scoreLabel": "recommandé",
+          "summary": "⚡ Discussion “Énergie durabilité” à La Dérivée, dimanche 14 juin 17h–18h: local et probablement gratuit, intéressant pour un·e enfant curieux·se, mais pas annoncé comme activité enfant et risque d’être trop adulte pour Andy/Lennon.",
+          "reasons": [
+            "Lennon: nature, plein air ; Andy: culture, eau ; Daisy: culture ; Johan: plein air, nature, culture",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "âge non précisé"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        },
+        {
+          "id": "la-derivee-8419c0a580b2",
+          "title": "Atelier d’écriture",
+          "sourceKey": "la-derivee",
+          "sourceLabel": "La Dérivée (Yverdon)",
+          "url": "https://www.laderivee.ch/event/atelier-d-ecriture-1",
+          "location": "La Dérivée, Quai de Nogent, Yverdon-les-Bains",
+          "city": "Yverdon-les-Bains",
+          "startDate": "2026-06-13T16:00:00+02:00",
+          "endDate": "2026-06-13",
+          "ageText": "famille / enfants mentionnés",
+          "priceText": "Gratuit / buvette estivale (site: centre culturel estival gratuit)",
+          "tags": [
+            "outdoor",
+            "culture",
+            "science",
+            "sport",
+            "discovery",
+            "water"
+          ],
+          "description": "par Aurora Mesot — Aurora Mesot est une artiste multidisciplinaire qui explore les liens entre intime et politique à travers l’écriture, l’image et le mouvement. Son travail interroge les récits contemporains et les conditions de création, notamment à travers une réflexion inspirée de Une chambre à soi de Virginia Woo…",
+          "verdict": "rejected",
+          "verdictLabel": "Écarté après vérification",
+          "verdictRank": 1,
+          "confidenceStatus": "",
+          "score": 96,
+          "scoreLabel": "recommandé",
+          "summary": "À écarter pour une sortie famille: **Atelier d’écriture** à La Dérivée, samedi 13 juin 16h–18h, gratuit/local, mais le descriptif parle d’un atelier estival **pour femmes** autour de l’écriture, dessin/fanzine et de l’émancipation — pas adapté à Andy/Lennon malgré le score scraper très élevé.",
+          "reasons": [
+            "Lennon: plein air, découverte ; Andy: science, culture, sport ; Daisy: culture ; Johan: sport, plein air, science",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "Gratuit / buvette estivale (site: centre culturel estival gratuit)"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        },
+        {
+          "id": "la-derivee-dad1b5d5cd46",
+          "title": "Soirée messages",
+          "sourceKey": "la-derivee",
+          "sourceLabel": "La Dérivée (Yverdon)",
+          "url": "https://www.laderivee.ch/event/soiree-messages-2",
+          "location": "La Dérivée, Quai de Nogent, Yverdon-les-Bains",
+          "city": "Yverdon-les-Bains",
+          "startDate": "2026-06-13T20:00:00+02:00",
+          "endDate": "2026-06-13",
+          "ageText": "famille / enfants mentionnés",
+          "priceText": "Gratuit / buvette estivale (site: centre culturel estival gratuit)",
+          "tags": [
+            "cosy",
+            "outdoor",
+            "culture",
+            "water"
+          ],
+          "description": "par Les Jeux du Tiroir — Viens écrire des petits mots doux et anonymes. — Animation — Les Jeux du Tiroir",
+          "verdict": "rejected",
+          "verdictLabel": "Écarté après vérification",
+          "verdictRank": 1,
+          "confidenceStatus": "",
+          "score": 94,
+          "scoreLabel": "recommandé",
+          "summary": "⚠️ Je ne le mettrais pas dans la sélection familles: gratuit et sympa sur le quai, mais c’est une soirée sociale à 20h–23h30, sans indication enfants/famille.",
+          "reasons": [
+            "Lennon: plein air ; Andy: culture, eau ; Daisy: cosy, culture ; Johan: plein air, culture",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "Gratuit / buvette estivale (site: centre culturel estival gratuit)"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        }
+      ]
+    },
+    {
+      "runId": "v02-2026-06-04T16-02-57-543Z",
+      "generatedAt": "2026-06-04T16:02:57.543Z",
+      "window": {
+        "start": "2026-06-06",
+        "endExclusive": "2026-06-08"
+      },
+      "counts": {
+        "total": 5,
+        "recommended": 2,
+        "secondary": 3,
+        "rejected": 0
+      },
+      "sources": [
+        {
+          "source": "Grandson",
+          "status": "ok",
+          "count": 19
+        },
+        {
+          "source": "Yverdon-les-Bains",
+          "status": "ok",
+          "count": 53
+        },
+        {
+          "source": "InfomaniakYverdon",
+          "status": "ok",
+          "count": 7
+        }
+      ],
+      "activities": [
+        {
+          "id": "grandson-4ae84e8c386d",
+          "title": "Journée ludique des familles",
+          "sourceKey": "grandson",
+          "sourceLabel": "Grandson",
+          "url": "https://www.grandson.ch/agenda/journee-ludique-des-familles/",
+          "location": "Salle de Paroisse de Grandson Rue Haute, devant le Temple Attention, aucun parking n’est possible dans la rue, privilégiez la mobilité douce ! Quelques places…",
+          "city": "Grandson",
+          "startDate": "2026-06-07T13:00:00+02:00",
+          "endDate": "",
+          "ageText": "tout public / famille",
+          "priceText": "libre, au profit de l’Association Gregory et Didier",
+          "tags": [
+            "nature",
+            "outdoor",
+            "mountain",
+            "indoor"
+          ],
+          "description": "DIMANCHE 07 JUIN 2026 Journée ludique des familles Après-midi familiale et solidaire, organisée par la paroisse protestante de Grandson, en partenariat avec l’Association Gregory et Didier et La Grande Partie Au programme : Jeux de société en libre accès Tournoi One Piece dès 7 ans (16 places, inscription souhaitée) B…",
+          "verdict": "recommended",
+          "verdictLabel": "Recommandé",
+          "verdictRank": 3,
+          "confidenceStatus": "",
+          "score": 94,
+          "scoreLabel": "recommandé",
+          "summary": "🎲 **Journée ludique des familles** — dim. 7 juin, 13h–17h à la Salle de Paroisse de Grandson: après-midi jeux de société gratuite, tournoi One Piece dès 7 ans (16 places, inscription souhaitée), buvette à prix libre; attention, pas de parking dans la rue Haute.",
+          "reasons": [
+            "Lennon: nature, plein air ; Andy: intérieur ; Daisy: montagne, intérieur ; Johan: plein air, montagne, nature",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "inscription/réservation à vérifier"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        },
+        {
+          "id": "grandson-561794a4d83a",
+          "title": "GRANDSON-MORAT 2026: TIR HISTORIQUE A L’ARBALETE",
+          "sourceKey": "grandson",
+          "sourceLabel": "Grandson",
+          "url": "https://www.grandson.ch/agenda/grandson-morat-2026-tir-historique-a-larbalete/",
+          "location": "à 16h et ainsi être nommé « Roi du tir » (le samedi) ou « Roitelet » (le dimanche). > Toutes les infos et inscriptions > Voir l’affiche",
+          "city": "Grandson",
+          "startDate": "2026-06-07",
+          "endDate": "",
+          "ageText": "",
+          "priceText": "",
+          "tags": [
+            "nature",
+            "outdoor",
+            "culture"
+          ],
+          "description": "SAMEDI 06 – DIMANCHE 07 JUIN 2026 Tir historique à l’arbalète sur le « Papegay »! Le temps d’un week-end, les jardins du château reprennent vie au rythme des carreaux d’arbalète. Initiez-vous, défiez les autres tireurs et découvrez une tradition qui remonte aux défenseurs de Grandson! Depuis le XIIIe siècle, les confr…",
+          "verdict": "recommended",
+          "verdictLabel": "Recommandé",
+          "verdictRank": 3,
+          "confidenceStatus": "",
+          "score": 91,
+          "scoreLabel": "recommandé",
+          "summary": "🏹 Recommended — Tir historique à l’arbalète au Château de Grandson, dim. 7 juin 2026, 10h–17h; dès 5 ans, réservation nécessaire, 5 CHF/enfant pour le tir seul. Super pour Andy, moins adapté à Lennon qui sera sous la limite d’âge.",
+          "reasons": [
+            "Lennon: nature, plein air ; Andy: culture ; Daisy: culture ; Johan: plein air, nature, culture",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "prix à vérifier",
+            "âge non précisé",
+            "inscription/réservation à vérifier"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        },
+        {
+          "id": "infomaniak-yverdon-cbed9989b587",
+          "title": "Faire Paysan",
+          "sourceKey": "infomaniak-yverdon",
+          "sourceLabel": "Infomaniak-yverdon",
+          "url": "https://infomaniak.events/fr-ch/theatre/faire-paysan/4f0fff30-0b95-4472-81df-d825e2bcb5b3/events/391109",
+          "location": "Maison Pré-du-Canal - Yverdon-les-Bains",
+          "city": "Yverdon-les-Bains",
+          "startDate": "2026-06-06T11:00:00+02:00",
+          "endDate": "",
+          "ageText": "",
+          "priceText": "A partir de 0.-",
+          "tags": [
+            "culture",
+            "cosy",
+            "indoor"
+          ],
+          "description": "Retrouvez l’essence du théâtre et des arts vivants avec Faire Paysan, une immersion créative entre terre et scène pour célébrer l’artisanat et l’âme paysanne. Une expérience unique à ne pas manquer ! Théâtre et arts vivants",
+          "verdict": "secondary",
+          "verdictLabel": "Option secondaire",
+          "verdictRank": 2,
+          "confidenceStatus": "",
+          "score": 89,
+          "scoreLabel": "option secondaire",
+          "summary": "Option secondaire — **Faire Paysan** à la Maison Pré-du-Canal, sam. 6 juin à 11h: lecture-performance gratuite “tout public” sur inscription, dehors au sol/coussins. Intéressant côté culture locale, mais probablement trop littéraire/adulte pour de jeunes enfants; prévoir de quoi s’asseoir.",
+          "reasons": [
+            "Andy: culture, intérieur ; Daisy: cosy, culture, intérieur ; Johan: culture",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "âge non précisé"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        },
+        {
+          "id": "yverdon-ca915bb62c0a",
+          "title": "Tir historique à l’Arbalète au Château de Grandson",
+          "sourceKey": "yverdon",
+          "sourceLabel": "Yverdon-les-Bains",
+          "url": "https://yverdonlesbainsregion.ch/evenement/tir-historique-a-larbalete-au-chateau-de-grandson/",
+          "location": "Grandson",
+          "city": "Grandson",
+          "startDate": "2026-06-06",
+          "endDate": "",
+          "ageText": "",
+          "priceText": "",
+          "tags": [
+            "culture"
+          ],
+          "description": "6 Juin Tir historique à l’Arbalète au Château de Grandson Grandson",
+          "verdict": "secondary",
+          "verdictLabel": "Option secondaire",
+          "verdictRank": 2,
+          "confidenceStatus": "",
+          "score": 83,
+          "scoreLabel": "option secondaire",
+          "summary": "🏰 **Tir historique à l’arbalète — Château de Grandson** — 6–7 juin, 10h–17h: initiation/concours dès 5 ans, finale à 16h, tir seul 5–10 CHF ou offre musée 10–20 CHF; réservation conseillée/nécessaire pour les créneaux, super pour Andy mais Lennon risque d’être trop jeune pour tirer.",
+          "reasons": [
+            "Andy: culture ; Daisy: culture ; Johan: culture",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "prix à vérifier",
+            "âge non précisé"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        },
+        {
+          "id": "infomaniak-yverdon-a15216cc6a90",
+          "title": "Fafe na Suíça",
+          "sourceKey": "infomaniak-yverdon",
+          "sourceLabel": "Infomaniak-yverdon",
+          "url": "https://infomaniak.events/fr-ch/famille/fafe-na-suica/ade7fe7f-53ff-4420-ab11-b4c3ac564a7a/events/384407",
+          "location": "Marive - Yverdon-les-Bains",
+          "city": "Yverdon-les-Bains",
+          "startDate": "2026-06-06T19:00:00+02:00",
+          "endDate": "",
+          "ageText": "tout public / famille",
+          "priceText": "A partir de 0.-",
+          "tags": [
+            "water"
+          ],
+          "description": "Découvrez un délicieux Fafé na Suíça, vitela assada savoureuse et ambiance conviviale. Repas familial avec boissons (eau et sodas) incluses. Famille",
+          "verdict": "secondary",
+          "verdictLabel": "Option secondaire",
+          "verdictRank": 2,
+          "confidenceStatus": "",
+          "score": 78,
+          "scoreLabel": "recommandé",
+          "summary": "🇵🇹 Fafe na Suíça — dîner portugais au Marive, sam. 6 juin 19:00–02:00; enfants gratuits jusqu’à 6 ans, CHF 30 dès 7 ans, adultes CHF 60. Sympa culturellement, mais tard et cher: option secondaire plutôt qu’activité enfants prioritaire.",
+          "reasons": [
+            "Andy: eau",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "A partir de 0.-"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        }
+      ]
+    },
+    {
+      "runId": "v02-2026-05-22T16-03-11-881Z",
+      "generatedAt": "2026-05-22T16:03:11.881Z",
+      "window": {
+        "start": "2026-05-23",
+        "endExclusive": "2026-05-25"
+      },
+      "counts": {
+        "total": 5,
+        "recommended": 2,
+        "secondary": 1,
+        "rejected": 0
+      },
+      "sources": [
+        {
+          "source": "Grandson",
+          "status": "ok",
+          "count": 23
+        },
+        {
+          "source": "Yverdon-les-Bains",
+          "status": "ok",
+          "count": 55
+        },
+        {
+          "source": "InfomaniakYverdon",
+          "status": "ok",
+          "count": 13
+        }
+      ],
+      "activities": [
+        {
+          "id": "grandson-520f76d516de",
+          "title": "Fête de la Nature: Visite coteau Derrière-les-Remparts",
+          "sourceKey": "grandson",
+          "sourceLabel": "Grandson",
+          "url": "https://www.grandson.ch/agenda/fete-de-la-nature-visite-coteau-derriere-les-remparts/",
+          "location": "Coteau Derrière-les-Remparts",
+          "city": "Grandson",
+          "startDate": "2026-05-23T09:00:00+02:00",
+          "endDate": "",
+          "ageText": "",
+          "priceText": "Gratuit",
+          "tags": [
+            "nature",
+            "animals",
+            "outdoor",
+            "walk"
+          ],
+          "description": "SAMEDI 23 mai 2026 Fête de la Nature – Nature en ville à Grandson : le coteau Derrière-les-Remparts Dans le cadre de la Fête de la Nature, la Commune organise samedi 23 mai une visite du coteau Derrière-les-Remparts. Cette visite permettra d’observer différents milieux agro-écologiques en gestion extensive (prairies d…",
+          "verdict": "recommended",
+          "verdictLabel": "Recommandé",
+          "verdictRank": 3,
+          "confidenceStatus": "",
+          "score": 87,
+          "scoreLabel": "recommandé",
+          "summary": "",
+          "reasons": [
+            "Lennon: animaux, nature, plein air ; Daisy: balade ; Johan: plein air, nature",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "âge non précisé",
+            "inscription/réservation à vérifier"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        },
+        {
+          "id": "infomaniak-yverdon-e555aacc0cd9",
+          "title": "Spectacle des kids",
+          "sourceKey": "infomaniak-yverdon",
+          "sourceLabel": "Infomaniak-yverdon",
+          "url": "https://infomaniak.events/fr-ch/theatre/spectacle-des-kids/6f2bd8ea-f0e7-407f-9641-fab3054f5151/events/389914",
+          "location": "L'Echandole - Yverdon-les-Bains",
+          "city": "Yverdon-les-Bains",
+          "startDate": "2026-05-24T13:30:00+02:00",
+          "endDate": "",
+          "ageText": "tout public / famille",
+          "priceText": "A partir de 0.-",
+          "tags": [
+            "culture",
+            "indoor"
+          ],
+          "description": "Découvrez un spectacle dynamique et créatif où les enfants s’expriment sur scène ! Rires, musique et émotion garantis pour toute la famille. Théâtre et arts vivants",
+          "verdict": "recommended",
+          "verdictLabel": "Recommandé",
+          "verdictRank": 3,
+          "confidenceStatus": "",
+          "score": 86,
+          "scoreLabel": "recommandé",
+          "summary": "",
+          "reasons": [
+            "Andy: culture, intérieur ; Daisy: culture, intérieur ; Johan: culture",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "A partir de 0.-"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        },
+        {
+          "id": "infomaniak-yverdon-3f7d5281fb63",
+          "title": "4 mariages et pas d'enterrement",
+          "sourceKey": "infomaniak-yverdon",
+          "sourceLabel": "Infomaniak-yverdon",
+          "url": "https://infomaniak.events/fr-ch/theatre/4-mariages-et-pas-denterrement/db1330bc-a683-47b0-b16c-f5cdea9e8e0c/events/389916",
+          "location": "Hôtel de Ville - Salle des débats - Yverdon-les-Bains",
+          "city": "Yverdon-les-Bains",
+          "startDate": "2026-05-23T11:00:00+02:00",
+          "endDate": "",
+          "ageText": "",
+          "priceText": "A partir de 0.-",
+          "tags": [
+            "culture",
+            "indoor"
+          ],
+          "description": "Vous êtes cordialement invité·s à une cérémonie de mariage improvisée à l’Hôtel de Ville d’Yverdon-les-Bains. Les improvisateur·ices endossent les rôles clés : époux·ses, oficier·ère d’état civil, témoins, parent·es… Théâtre et arts vivants",
+          "verdict": "secondary",
+          "verdictLabel": "Option secondaire",
+          "verdictRank": 2,
+          "confidenceStatus": "",
+          "score": 86,
+          "scoreLabel": "option secondaire",
+          "summary": "",
+          "reasons": [
+            "Andy: culture, intérieur ; Daisy: culture, intérieur ; Johan: culture",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "âge non précisé"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        },
+        {
+          "id": "grandson-72fc230e0070",
+          "title": "GRANDSON-MORAT 2026: Charles – L’Opéra. Du Hardi au Téméraire",
+          "sourceKey": "grandson",
+          "sourceLabel": "Grandson",
+          "url": "https://www.grandson.ch/agenda/grandson-morat-2026-opera/",
+          "location": "Cour intérieure du Château de Grandson",
+          "city": "Grandson",
+          "startDate": "2026-05-24",
+          "endDate": "",
+          "ageText": "tout public / famille",
+          "priceText": "",
+          "tags": [
+            "culture",
+            "indoor"
+          ],
+          "description": "SAMEDI 23 – DIMANCHE 24 MAI 2026 Après l’immense succès de Jehanne en 2021, l’association Lumen Canor présente son nouvel opéra au Château de Grandson: CHARLES – L’OPERA. Du Hardi au Téméraire. Bien plus qu’un simple spectacle, cet opéra tout public sera un événement exceptionnel, à ne manquer sous aucun prétexte! Dan…",
+          "verdict": "unknown",
+          "verdictLabel": "Non vérifié",
+          "verdictRank": 0,
+          "confidenceStatus": "",
+          "score": 83,
+          "scoreLabel": "recommandé",
+          "summary": "",
+          "reasons": [
+            "Andy: culture, intérieur ; Daisy: culture, intérieur ; Johan: culture",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "prix à vérifier"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        },
+        {
+          "id": "yverdon-98188425025c",
+          "title": "La Nuit des Musées à Yverdon-les-Bains",
+          "sourceKey": "yverdon",
+          "sourceLabel": "Yverdon-les-Bains",
+          "url": "https://yverdonlesbainsregion.ch/evenement/la-nuit-des-musees-a-yverdon-les-bains/",
+          "location": "Yverdon-les-Bains",
+          "city": "Yverdon-les-Bains",
+          "startDate": "2026-05-23",
+          "endDate": "",
+          "ageText": "",
+          "priceText": "",
+          "tags": [
+            "culture",
+            "indoor"
+          ],
+          "description": "23 Mai La Nuit des Musées à Yverdon-les-Bains Yverdon-les-Bains",
+          "verdict": "unknown",
+          "verdictLabel": "Non vérifié",
+          "verdictRank": 0,
+          "confidenceStatus": "",
+          "score": 83,
+          "scoreLabel": "option secondaire",
+          "summary": "",
+          "reasons": [
+            "Andy: culture, intérieur ; Daisy: culture, intérieur ; Johan: culture",
+            "très proche d’Yverdon",
+            "tombe le week-end ciblé"
+          ],
+          "caveats": [
+            "prix à vérifier",
+            "âge non précisé"
+          ],
+          "officialSources": [],
+          "provenanceNote": ""
+        }
+      ]
+    }
+  ],
+  "confirmedProgram": [
+    {
+      "id": "theatre-passage-tu-comprendras-quand-tu-seras-grand-2026",
+      "title": "Tu comprendras quand tu seras grand",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 6 ans",
+      "tags": [
+        "culture",
+        "indoor",
+        "discovery"
+      ],
+      "dates": [
+        "2026-10-25T11:00:00+01:00",
+        "2026-10-25T17:00:00+01:00"
+      ],
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "provenanceNote": "Confirmé via source officielle ; photo d’origine conservée en privé"
+    },
+    {
+      "id": "theatre-passage-pouvoir-2026",
+      "title": "Pouvoir",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 10 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [
+        "2026-11-14T18:00:00+01:00",
+        "2026-11-15T11:00:00+01:00",
+        "2026-11-15T15:00:00+01:00"
+      ],
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "provenanceNote": "Confirmé via source officielle ; photo d’origine conservée en privé"
+    },
+    {
+      "id": "theatre-passage-petite-balade-aux-enfers-2026",
+      "title": "Petite balade aux enfers",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 6 ans",
+      "tags": [
+        "culture",
+        "indoor",
+        "discovery"
+      ],
+      "dates": [
+        "2026-11-15T14:00:00+01:00",
+        "2026-11-15T17:00:00+01:00"
+      ],
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "provenanceNote": "Confirmé via source officielle ; photo d’origine conservée en privé"
+    },
+    {
+      "id": "theatre-passage-la-noce-d-alfonse-2026",
+      "title": "La Noce d’Alfonse",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 6 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [
+        "2026-12-02T19:00:00+01:00",
+        "2026-12-03T20:00:00+01:00"
+      ],
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "provenanceNote": "Confirmé via source officielle ; photo d’origine conservée en privé"
+    },
+    {
+      "id": "theatre-passage-fertik-2026",
+      "title": "Fertik",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 8 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [
+        "2026-12-17T20:00:00+01:00",
+        "2026-12-18T20:00:00+01:00",
+        "2026-12-19T18:00:00+01:00",
+        "2026-12-20T17:00:00+01:00"
+      ],
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "provenanceNote": "Confirmé via source officielle ; photo d’origine conservée en privé"
+    },
+    {
+      "id": "theatre-passage-fusees-2027",
+      "title": "Fusées",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 6 ans",
+      "tags": [
+        "culture",
+        "indoor",
+        "discovery"
+      ],
+      "dates": [
+        "2027-01-16T18:00:00+01:00"
+      ],
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "provenanceNote": "Confirmé via source officielle ; photo d’origine conservée en privé"
+    },
+    {
+      "id": "theatre-passage-a-simple-space-2027",
+      "title": "A Simple Space",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 5 ans",
+      "tags": [
+        "culture",
+        "indoor",
+        "sport"
+      ],
+      "dates": [
+        "2027-02-08T20:00:00+01:00",
+        "2027-02-09T20:00:00+01:00"
+      ],
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "provenanceNote": "Confirmé via source officielle ; photo d’origine conservée en privé"
+    },
+    {
+      "id": "theatre-passage-l-ours-kintsugi-2027",
+      "title": "L’ours Kintsugi",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 5 ans",
+      "tags": [
+        "culture",
+        "indoor",
+        "discovery"
+      ],
+      "dates": [
+        "2027-02-14T11:00:00+01:00",
+        "2027-02-14T17:00:00+01:00"
+      ],
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "provenanceNote": "Confirmé via source officielle ; photo d’origine conservée en privé"
+    },
+    {
+      "id": "theatre-passage-nous-ou-le-paradoxe-du-herisson-2027",
+      "title": "Nous ou le paradoxe du hérisson",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 7 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [
+        "2027-03-21T17:00:00+01:00"
+      ],
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "provenanceNote": "Confirmé via source officielle ; photo d’origine conservée en privé"
+    },
+    {
+      "id": "theatre-passage-bachibouzouk-2027",
+      "title": "Bachibouzouk",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 6 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [
+        "2027-05-02T17:00:00+02:00"
+      ],
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "provenanceNote": "Confirmé via source officielle ; photo d’origine conservée en privé"
+    },
+    {
+      "id": "theatre-passage-poil-de-la-bete-2027",
+      "title": "Poil de la bête",
+      "venue": "Théâtre du Passage",
+      "city": "Neuchâtel",
+      "ageText": "Dès 3 ans",
+      "tags": [
+        "culture",
+        "indoor"
+      ],
+      "dates": [
+        "2027-05-12T19:00:00+02:00"
+      ],
+      "officialSources": [
+        "https://www.theatredupassage.ch/abonnements/passdecouverte/passfamille"
+      ],
+      "provenanceNote": "Confirmé via source officielle ; photo d’origine conservée en privé"
+    }
+  ]
+}

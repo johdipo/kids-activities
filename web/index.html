@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Kids Activities — idées famille pour le week-end, vérifiées à la main (pilote)." />
+  <title>Kids Activities — pilote</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%88%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <h1 id="app-title">Kids Activities</h1>
+      <p id="app-subtitle" class="subtitle"></p>
+      <div class="meta-row">
+        <span id="app-region" class="chip chip-muted"></span>
+        <span id="freshness" class="chip chip-muted"></span>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap" id="main">
+    <!-- States -->
+    <div id="loading" class="state-panel">Chargement des recommandations…</div>
+    <div id="error" class="state-panel state-error" hidden>
+      <strong>Impossible de charger les données.</strong>
+      <p id="error-detail" class="muted"></p>
+      <p class="muted">Générez l’export avec <code>node automation/export_web_data.js</code> puis rechargez la page.</p>
+    </div>
+
+    <div id="content" hidden>
+      <p id="disclaimer" class="disclaimer"></p>
+
+      <section id="upcoming-section" aria-labelledby="upcoming-heading">
+        <div class="section-head">
+          <h2 id="upcoming-heading">Ce week-end</h2>
+          <span id="upcoming-window" class="chip"></span>
+        </div>
+        <div id="upcoming-empty" class="state-panel" hidden>
+          Aucune sélection vérifiée pour un week-end à venir pour l’instant.
+          La prochaine revue apparaîtra ici.
+        </div>
+        <div id="upcoming-list" class="card-grid"></div>
+      </section>
+
+      <section id="program-section" aria-labelledby="program-heading" hidden>
+        <div class="section-head">
+          <h2 id="program-heading">Programme confirmé à venir</h2>
+        </div>
+        <p class="muted small">Événements confirmés via une source officielle, au-delà du week-end courant.</p>
+        <div id="program-list" class="card-grid"></div>
+      </section>
+
+      <section id="past-section" aria-labelledby="past-heading" hidden>
+        <div class="section-head">
+          <h2 id="past-heading">Sélections précédentes</h2>
+        </div>
+        <div id="past-list"></div>
+      </section>
+
+      <section id="sources-section" aria-labelledby="sources-heading" hidden>
+        <div class="section-head">
+          <h2 id="sources-heading">Sources &amp; fraîcheur des données</h2>
+        </div>
+        <p id="sources-freshness" class="muted small"></p>
+        <ul id="sources-list" class="source-list"></ul>
+      </section>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <p class="muted small">
+        Pilote interne · données vérifiées manuellement · export safelisté.
+        Vérifiez toujours horaires, météo et réservations sur la page source avant de partir.
+      </p>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
