@@ -77,6 +77,11 @@ const SOURCES = {
     baseUrl: 'https://lepommier.ch',
     kind: 'official-young-audience-theatre-agenda'
   },
+  theatreBennoBesson: {
+    url: 'https://www.theatrebennobesson.ch/jeunepublic',
+    baseUrl: 'https://www.theatrebennobesson.ch',
+    kind: 'official-young-audience-theatre-agenda'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -1086,6 +1091,87 @@ async function scrapeLePommier() {
   return { events: uniqBy(events, e => e.id), note: `${events.length} Le Pommier young-audience occurrence(s) from ${listings.length} listing(s)` };
 }
 
+function bennoSeasonYearFromMonth(month) {
+  const m = Number(month);
+  return m >= 9 ? 2026 : 2027;
+}
+
+function parseBennoDateWithoutYear(text) {
+  const date = parseFrenchDate(clean(text).normalize('NFC'), 2026);
+  if (!date) return null;
+  const month = date.slice(5, 7);
+  return `${bennoSeasonYearFromMonth(month)}-${month}-${date.slice(8, 10)}`;
+}
+
+function bennoSlug(title = '') {
+  return titleKey(title).replace(/\s+/g, '-').slice(0, 80) || sha(title);
+}
+
+function extractTheatreBennoBessonListings(html, pageUrl = SOURCES.theatreBennoBesson.url) {
+  const $ = cheerio.load(html);
+  const events = [];
+  const seen = new Set();
+  const byId = id => $(`[id="${String(id).replace(/"/g, '\"')}"]`);
+  const textById = id => clean(byId(id).text()).normalize('NFC');
+
+  $('[id^="comp-mbunoa8k__item"]').each((_, root) => {
+    const id = ($(root).attr('id') || '').replace(/^comp-mbunoa8k__item/, '');
+    if (!id) return;
+    const dateText = textById(`comp-mbunoa8p2__item${id}`);
+    let title = textById(`comp-mbunoa8s__item${id}`);
+    let company = textById(`comp-mbunp8b8__item${id}`);
+    const categoryAge = textById(`comp-mbunoa8t2__item${id}`);
+    const schoolNote = textById(`comp-mbunqfsw__item${id}`);
+    if (/[-–]\s*$/.test(title) && company) { title = `${title} ${company}`; company = ''; }
+    const date = parseBennoDateWithoutYear(dateText);
+    const detailUrl = canonicalUrl(byId(`comp-mbuo7ime1__item${id}`).find('a[href*="/programme-26-27/"]').attr('href') || '', pageUrl)
+      || `${pageUrl}#${bennoSlug(title)}`;
+    const ageText = (categoryAge.match(/d[èe]s\s*\d+\s*ans/i) || [''])[0];
+    if (!title || !date) return;
+    const key = `${title}|${date}`;
+    if (seen.has(key)) return; seen.add(key);
+    events.push(normalizeEvent({
+      source: 'theatreBennoBesson', title, startDate: date,
+      locationName: 'Théâtre Benno Besson', locationText: 'Théâtre Benno Besson, Yverdon-les-Bains', city: 'Yverdon-les-Bains',
+      url: detailUrl, ageText, priceText: '',
+      description: clean([company, categoryAge, schoolNote].filter(Boolean).join(' — ')),
+      evidence: clean([dateText, title, company, categoryAge, schoolNote, detailUrl].filter(Boolean).join(' | ')),
+      sourceProvenance: `${pageUrl} — page Jeune Public Wix statique`,
+      officialSources: [pageUrl, detailUrl]
+    }));
+  });
+
+  $('[id^="comp-mbyu0lxn__item"]').each((_, root) => {
+    const id = ($(root).attr('id') || '').replace(/^comp-mbyu0lxn__item/, '');
+    if (!id) return;
+    const category = textById(`comp-mbyu0lyi__item${id}`);
+    const title = textById(`comp-mbyu0lyy__item${id}`);
+    const company = textById(`comp-mbyu0lz3__item${id}`);
+    const dateAge = textById(`comp-mbyu0lz52__item${id}`);
+    const date = parseFrenchDate(dateAge, 2027);
+    const ageText = (dateAge.match(/d[èe]s\s*\d+\s*ans/i) || [''])[0];
+    if (!title || !date) return;
+    const key = `${title}|${date}`;
+    if (seen.has(key)) return; seen.add(key);
+    const eventUrl = `${pageUrl}#${bennoSlug(title)}`;
+    events.push(normalizeEvent({
+      source: 'theatreBennoBesson', title, startDate: date,
+      locationName: 'Théâtre Benno Besson', locationText: 'Théâtre Benno Besson, Yverdon-les-Bains', city: 'Yverdon-les-Bains',
+      url: eventUrl, ageText, priceText: '',
+      description: clean([company, category, dateAge].filter(Boolean).join(' — ')),
+      evidence: clean([category, title, company, dateAge].filter(Boolean).join(' | ')),
+      sourceProvenance: `${pageUrl} — bloc Spectacles à venir`,
+      officialSources: [pageUrl]
+    }));
+  });
+  return events;
+}
+
+async function scrapeTheatreBennoBesson() {
+  const html = await fetchHtml(SOURCES.theatreBennoBesson.url, 30000);
+  return extractTheatreBennoBessonListings(html, SOURCES.theatreBennoBesson.url);
+}
+
 function extractTheatreDuPassageDetailLinks(html, pageUrl = SOURCES.theatreDuPassage.listUrl) {
   const $ = cheerio.load(html);
   const links = new Map();
@@ -1449,7 +1535,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -1544,6 +1630,11 @@ function runFixtureTests() {
   assert.strictEqual(theatreEvent.city, 'Neuchâtel');
   assert.strictEqual(theatreEvent.ageText, 'Dès 6 ans');
   assert(theatreEvent.priceText.includes('Tarif enfant'), 'Théâtre du Passage fixture should keep price evidence');
+  const bennoEvents = extractTheatreBennoBessonListings('<main><div id="comp-mbunoa8k__item1"><p id="comp-mbunoa8p2__item1">ME 11 NOVEMBRE</p><h2 id="comp-mbunoa8s__item1"><a href="https://www.theatrebennobesson.ch/programme-25-26/pistache">Cosimo</a></h2><p id="comp-mbunp8b8__item1">Cie L’Oiseau à Ressort</p><p id="comp-mbunoa8t2__item1">THÉÂTRE / DÈS 7 ANS</p><p id="comp-mbunqfsw__item1">Les élèves de 9-10S d’Yverdon-les-Bains verront ce spectacle avec l’école</p><div id="comp-mbuo7ime1__item1"><a href="https://www.theatrebennobesson.ch/programme-26-27/cosimo">Read All</a></div></div><div id="comp-mbyu0lxn__item2"><p id="comp-mbyu0lyi__item2">THÉÂTRE</p><h2 id="comp-mbyu0lyy__item2">La Tente</h2><p id="comp-mbyu0lz3__item2">Les filles d’Artémis</p><p id="comp-mbyu0lz52__item2">Sa 31 octobre 2026 dès 5 ans</p></div></main>');
+  assert.strictEqual(bennoEvents.length, 2);
+  assert.strictEqual(bennoEvents[0].startDate, '2026-11-11');
+  assert.strictEqual(bennoEvents[0].ageText, 'DÈS 7 ANS');
+  assert(bennoEvents[1].url.includes('#tente'), 'Benno fixture should create stable fragment URLs for unlinked cards');
   const lePommierListings = extractLePommierListings('<div class="eventv2-grid"><a href="https://lepommier.ch/event/981-puisque-cest-comme-ca-je-vais-faire-un-opera-toute-seule" class="grid-item" data-date="1800144000"><div class="content" title="Puisque c’est comme ça je vais faire un opéra toute seule"><div class="date">Le 17 Jan.</div><div class="type">Théâtre</div></div></a></div>', SOURCES.lePommier.url);
   assert.strictEqual(lePommierListings.length, 1);
   const lePommierEvents = parseLePommierDetail('<main><h1>Puisque c’est comme ça je vais faire un opéra toute seule</h1><p>Informations Auteur / Autrice Claire Diterzi Genre Théâtre Type d\'événement Jeune public Age conseillé Dès 5 ans Durée 45 minutes Made in France Lieu Le Pommier Rue du Pommier 9 2000 Neuchâtel Billetterie Opéra Mode d’emploi (pour toute la famille) Les horaires et tarifs Dimanche 17 janvier 2027 à 10 h 30 Dimanche 17 janvier 2027 à 16 h 00 Jeune public Tarif unique : 15 CHF Abonnement de saison, découverte et jeune public : gratuit Distribution</p></main>', lePommierListings[0]);
@@ -1613,4 +1704,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
