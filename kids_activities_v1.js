@@ -87,6 +87,11 @@ const SOURCES = {
     baseUrl: 'https://echandole.ch',
     kind: 'official-theatre-family-agenda'
   },
+  leProgrammeVaudKids: {
+    url: 'https://vd.leprogramme.ch/spectacle-enfants',
+    baseUrl: 'https://vd.leprogramme.ch',
+    kind: 'vaud-child-family-theatre-aggregator'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -1258,6 +1263,138 @@ async function scrapeEchandole() {
   return uniqBy(events.filter(e => e.title && e.url && e.startDate), e => e.id);
 }
 
+function leProgrammeVaudPageUrl(page = 1) {
+  return page <= 1 ? SOURCES.leProgrammeVaudKids.url : `${SOURCES.leProgrammeVaudKids.url}?page=${page}`;
+}
+
+function parseLeProgrammeVaudDateText(text, fallbackYear = 2026) {
+  const t = clean(text);
+  const occurrences = [];
+  const range = t.match(new RegExp(`Du\\s+(\\d{1,2})\\s+au\\s+(\\d{1,2})\\s+(${MONTH_RE})\\s+(\\d{4})(?:\\s+à\\s+([^,;]+))?`, 'i'));
+  if (range) {
+    const year = range[4];
+    const month = MONTHS[range[3].toLowerCase()];
+    const startDate = `${year}-${month}-${range[1].padStart(2, '0')}`;
+    const endDate = `${year}-${month}-${range[2].padStart(2, '0')}`;
+    occurrences.push({ startDate: isoDateZurich(startDate, range[5] || ''), endDate, dateText: t });
+    return occurrences;
+  }
+  const date = parseFrenchDate(t, fallbackYear);
+  if (!date) return occurrences;
+  const afterA = clean((t.match(/à\s+(.+)$/i) || [])[1] || '');
+  const times = afterA.match(/\d{1,2}\s*[:h]\s*\d{2}/g) || [];
+  if (times.length) {
+    for (const time of times) occurrences.push({ startDate: isoDateZurich(date, time), endDate: null, dateText: t });
+  } else {
+    occurrences.push({ startDate: date, endDate: null, dateText: t });
+  }
+  return occurrences;
+}
+
+function extractLeProgrammeVaudListings(html, pageUrl = SOURCES.leProgrammeVaudKids.url) {
+  const $ = cheerio.load(html);
+  const listings = [];
+  $('a.card-spectacle[href]').each((_, a) => {
+    const $a = $(a);
+    const url = canonicalUrl($a.attr('href'), pageUrl);
+    if (!url) return;
+    const title = clean($a.find('.card-title').first().text() || $a.attr('title'));
+    const cardText = clean($a.text());
+    const metaText = clean($a.find('.card-text').first().text());
+    const description = clean($a.find('.card-description').first().text());
+    const category = clean($a.find('.card-tags li').map((_, li) => clean($(li).text())).get().join(' | '));
+    const dateLine = clean((metaText.match(new RegExp(`(?:Le|Du)\\s+.+?(?:${MONTH_RE})\\s+\\d{4}(?:\\s+à\\s+(?:\\d{1,2}\\s*[:h]\\s*\\d{2}(?:\\s+et\\s+)?)+)?`, 'i')) || [])[0] || '');
+    const locationText = clean(dateLine ? metaText.replace(dateLine, '') : metaText);
+    const ageText = clean((description.match(/(?:D[èe]s\s*\d+\s*ans|Tout public|Famille)[^.]*/i) || [])[0] || 'Spectacle pour enfant / famille');
+    const occurrences = parseLeProgrammeVaudDateText(dateLine, 2026);
+    if (title && occurrences.length) listings.push({ title, url, dateLine, locationText, description, category, ageText, occurrences, rawText: cardText });
+  });
+  return uniqBy(listings, x => `${x.url}|${x.dateLine}`);
+}
+
+function leProgrammeCityFromLocation(text = '') {
+  const t = clean(text);
+  const known = cityFromLocation(t, '');
+  if (known) return known;
+  const commaCity = clean((t.match(/,\s*([^,]+)$/) || [])[1] || '');
+  if (commaCity && commaCity.length <= 40 && !/\d/.test(commaCity)) return commaCity;
+  const postal = clean((t.match(/\b\d{4}\s+([A-ZÀ-Ÿ][A-Za-zÀ-ÿ'’ -]{2,40})/) || [])[1] || '');
+  return postal;
+}
+
+function parseLeProgrammeVaudDetail(html, listing = {}) {
+  const $ = cheerio.load(html);
+  const bodyText = clean($('body').text());
+  const canonical = $('link[rel="canonical"]').attr('href') || listing.url || SOURCES.leProgrammeVaudKids.url;
+  const h1 = clean($('h1').first().text());
+  const title = clean(h1 || listing.title || $('title').text().split('-')[0]);
+  const eventType = clean($('a[href*="/spectacle-enfants"], .breadcrumb, .card-time-rotate').first().text()) || 'Enfant et famille';
+  const duration = clean((bodyText.match(/Durée\s*:\s*([^\n]+?)(?:\s+Entrée|\s+Dates|\s+Infos pratiques|$)/i) || [])[1] || '');
+  const priceText = clean((bodyText.match(/(?:Entrée libre|Gratuit|\d+\s*CHF[^.\n]*|Tarif[^.\n]*|prix des ateliers[^.\n]*)/i) || [])[0] || listing.priceText || '');
+  const detailDateBlock = clean((bodyText.match(/Dates & horaires\s+(.+?)\s+Infos pratiques/i) || [])[1] || '');
+  const occurrences = detailDateBlock ? parseLeProgrammeVaudDateText(detailDateBlock, 2026) : (listing.occurrences || []);
+  const infoBlock = clean((bodyText.match(/Infos pratiques\s+(.+?)\s+Lieu de l’événement/i) || [])[1] || '');
+  const venueBlock = clean((bodyText.match(/Lieu de l’événement\s+(.+?)\s+(?:Contact|Pour s’y rendre|Agenda|$)/i) || [])[1] || '');
+  const locationText = clean(venueBlock || infoBlock || listing.locationText || 'Canton de Vaud');
+  const firstSentence = clean((bodyText.split('Galerie de photos')[0] || bodyText).split('Lieu de l’événement').pop() || listing.description || '');
+  const description = clean([listing.category, eventType, duration ? `Durée: ${duration}` : '', listing.description, firstSentence].filter(Boolean).join(' | ')).slice(0, 900);
+  const ageText = clean((description.match(/(?:D[èe]s\s*\d+\s*ans|Tout public|Famille)[^.|]*/i) || [])[0] || listing.ageText || 'Spectacle pour enfant / famille');
+  return (occurrences.length ? occurrences : (listing.occurrences || [])).map((occ, idx) => normalizeEvent({
+    source: 'leProgrammeVaudKids',
+    title,
+    startDate: occ.startDate,
+    endDate: occ.endDate || null,
+    locationName: clean((locationText.split(/\d{4}|Contact|Durée/)[0] || listing.locationText || '').replace(/Durée\s*:.*/i, '')),
+    locationText,
+    city: leProgrammeCityFromLocation(locationText) || leProgrammeCityFromLocation(listing.locationText || ''),
+    url: canonical,
+    description,
+    ageText,
+    priceText,
+    tags: inferTags(`${title} ${description} spectacle enfant famille théâtre musique cirque`),
+    sourceProvenance: `leprogramme.ch Vaud spectacle-enfants aggregator${idx > 0 ? ` occurrence ${idx + 1}` : ''}`,
+    officialSources: [canonical],
+    evidence: clean([listing.dateLine, occ.dateText, locationText, ageText, priceText, listing.category, duration].filter(Boolean).join(' | '))
+  }));
+}
+
+async function scrapeLeProgrammeVaudKids(maxPages = 6) {
+  const listings = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const url = leProgrammeVaudPageUrl(page);
+    try {
+      const html = await fetchHtml(url, 30000);
+      const pageListings = extractLeProgrammeVaudListings(html, url);
+      listings.push(...pageListings);
+      if (!pageListings.length) break;
+    } catch (err) {
+      console.warn(`[leProgrammeVaudKids] listing page ${page} failed: ${err.message}`);
+      break;
+    }
+  }
+  const events = [];
+  const uniqueListings = uniqBy(listings, x => x.url);
+  for (let i = 0; i < uniqueListings.length; i += 6) {
+    const batch = uniqueListings.slice(i, i + 6);
+    const batchEvents = await Promise.all(batch.map(async (listing) => {
+      try {
+        const detailHtml = await fetchHtml(listing.url, 15000);
+        return parseLeProgrammeVaudDetail(detailHtml, listing);
+      } catch (err) {
+        console.warn(`[leProgrammeVaudKids] detail fetch failed for ${listing.url}: ${err.message}`);
+        return listing.occurrences.map(occ => normalizeEvent({
+          source: 'leProgrammeVaudKids', title: listing.title, startDate: occ.startDate, endDate: occ.endDate || null,
+          locationName: listing.locationText, locationText: listing.locationText, city: leProgrammeCityFromLocation(listing.locationText),
+          url: listing.url, description: clean([listing.category, listing.description].filter(Boolean).join(' | ')),
+          ageText: listing.ageText, evidence: `Listing fallback: ${listing.rawText}`, sourceProvenance: 'leprogramme.ch Vaud spectacle-enfants listing fallback'
+        }));
+      }
+    }));
+    events.push(...batchEvents.flat());
+  }
+  return uniqBy(events.filter(e => e.title && e.url && e.startDate), e => e.id);
+}
+
 function extractTheatreDuPassageDetailLinks(html, pageUrl = SOURCES.theatreDuPassage.listUrl) {
   const $ = cheerio.load(html);
   const links = new Map();
@@ -1621,7 +1758,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -1730,6 +1867,16 @@ function runFixtureTests() {
   assert.strictEqual(echandoleEvents[0].city, 'Yverdon-les-Bains');
   assert.strictEqual(echandoleEvents[0].ageMin, 3);
   assert(echandoleEvents[0].priceText.includes('15.-'), 'Échandole fixture should keep tariff evidence');
+  const leProgrammeListings = extractLeProgrammeVaudListings('<a href="https://vd.leprogramme.ch/concerts/concerts-bebe-ensemble-les-variations-musicales-14/lausanne/cpo//spectacle-enfants/" class="card card-spectacle card-horizontal has-description theme-music"><div class="card-body"><h5 class="card-title">Concerts Bébé | Ensemble Les Variations Musicales</h5><p class="card-text">Le 22 Juin 2026 à 09:30 et 10:30<br>CPO, Lausanne</p><p class="card-description">Tout public. Les Concerts Bébé ont été pensés pour les tout petits et leurs parents.</p><ul class="card-tags"><li>Musique classique</li></ul></div></a>', SOURCES.leProgrammeVaudKids.url);
+  assert.strictEqual(leProgrammeListings.length, 1);
+  assert.strictEqual(leProgrammeListings[0].occurrences.length, 2);
+  const leProgrammeEvents = parseLeProgrammeVaudDetail('<body><h1>Concerts Bébé | Ensemble Les Variations Musicales</h1>Enfant et famille Musique classique Infos pratiques CPO, Lausanne Durée : 30 minutes 10 CHF Dates & horaires Le 22 Juin 2026 à 09:30 et 10:30 Infos pratiques CPO, Lausanne Durée : 30 minutes 10 CHF Lieu de l’événement CPO Ch. de Beau-Rivage 2 1006 Lausanne Contact cpo.ch Les Concerts Bébé ont été pensés pour les tout petits et leurs parents.</body>', leProgrammeListings[0]);
+  assert.strictEqual(leProgrammeEvents.length, 2);
+  assert.strictEqual(leProgrammeEvents[0].source, 'leProgrammeVaudKids');
+  assert.strictEqual(leProgrammeEvents[0].startDate, '2026-06-22T09:30:00+02:00');
+  assert.strictEqual(leProgrammeEvents[1].startDate, '2026-06-22T10:30:00+02:00');
+  assert.strictEqual(leProgrammeEvents[0].city, 'Lausanne');
+  assert(leProgrammeEvents[0].priceText.includes('10 CHF'), 'leprogramme.ch fixture should keep tariff evidence');
   const lePommierListings = extractLePommierListings('<div class="eventv2-grid"><a href="https://lepommier.ch/event/981-puisque-cest-comme-ca-je-vais-faire-un-opera-toute-seule" class="grid-item" data-date="1800144000"><div class="content" title="Puisque c’est comme ça je vais faire un opéra toute seule"><div class="date">Le 17 Jan.</div><div class="type">Théâtre</div></div></a></div>', SOURCES.lePommier.url);
   assert.strictEqual(lePommierListings.length, 1);
   const lePommierEvents = parseLePommierDetail('<main><h1>Puisque c’est comme ça je vais faire un opéra toute seule</h1><p>Informations Auteur / Autrice Claire Diterzi Genre Théâtre Type d\'événement Jeune public Age conseillé Dès 5 ans Durée 45 minutes Made in France Lieu Le Pommier Rue du Pommier 9 2000 Neuchâtel Billetterie Opéra Mode d’emploi (pour toute la famille) Les horaires et tarifs Dimanche 17 janvier 2027 à 10 h 30 Dimanche 17 janvier 2027 à 16 h 00 Jeune public Tarif unique : 15 CHF Abonnement de saison, découverte et jeune public : gratuit Distribution</p></main>', lePommierListings[0]);
@@ -1799,4 +1946,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
