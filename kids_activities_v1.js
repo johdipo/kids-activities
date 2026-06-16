@@ -82,6 +82,11 @@ const SOURCES = {
     baseUrl: 'https://www.theatrebennobesson.ch',
     kind: 'official-young-audience-theatre-agenda'
   },
+  echandole: {
+    url: 'https://echandole.ch/',
+    baseUrl: 'https://echandole.ch',
+    kind: 'official-theatre-family-agenda'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -1172,6 +1177,87 @@ async function scrapeTheatreBennoBesson() {
   return extractTheatreBennoBessonListings(html, SOURCES.theatreBennoBesson.url);
 }
 
+
+function parseEchandoleDateText(text, fallbackYear = 2026) {
+  const t = clean(text);
+  const date = parseNumericDate(t, fallbackYear);
+  return isoDateZurich(date, t);
+}
+
+function extractEchandoleListings(html, pageUrl = SOURCES.echandole.url) {
+  const $ = cheerio.load(html);
+  const listings = [];
+  $('.event-item').each((_, item) => {
+    const $item = $(item);
+    const url = canonicalUrl($item.find('a[href*="/spectacles/"]').first().attr('href'), pageUrl);
+    const title = clean($item.find('h2').first().text());
+    if (!url || !title) return;
+    const dateTexts = $item.find('.date').map((__, d) => clean($(d).text())).get().filter(Boolean);
+    const category = clean($item.find('.infos.category').first().text());
+    const infos = $item.find('.infos').map((__, info) => clean($(info).text())).get().filter(Boolean);
+    const ageText = infos.find(x => /d[èe]s\s*\d+\s*ans|tout public|famille/i.test(x)) || '';
+    listings.push({ title, url, dateTexts, category, ageText, rawText: clean($item.text()) });
+  });
+  return uniqBy(listings, l => `${l.url}|${l.title}|${l.dateTexts.join(',')}`);
+}
+
+function parseEchandoleDetail(html, listing = {}) {
+  const $ = cheerio.load(html);
+  const $scope = $('.single-event').length ? $('.single-event') : $('body');
+  const title = clean($scope.find('h1').first().text() || listing.title || $('title').text().split('|')[0]);
+  const subtitle = clean($scope.find('h1').first().next('p').text());
+  const dateTexts = $scope.find('.date').map((_, d) => clean($(d).text())).get().filter(Boolean);
+  const occurrenceDates = (dateTexts.length ? dateTexts : (listing.dateTexts || []))
+    .map(t => parseEchandoleDateText(t, 2026)).filter(Boolean);
+  const infos = $scope.find('.infos').map((_, info) => clean($(info).text())).get().filter(Boolean);
+  const category = clean($scope.find('.infos.category').first().text() || listing.category || '');
+  const ageText = infos.find(x => /d[èe]s\s*\d+\s*ans|tout public|famille/i.test(x)) || listing.ageText || '';
+  const durationText = infos.find(x => /\b\d+\s*min\b|\b\d+h\b/i.test(x)) || '';
+  const priceText = infos.find(x => /tarif|gratuit|chf|\.\-/i.test(x)) || '';
+  const paragraphs = $scope.find('p.wp-block-paragraph').map((_, p) => clean($(p).text())).get()
+    .filter(t => t && !/^texte, mise en scène/i.test(t) && !/^ecouter le podcast/i.test(t));
+  const description = clean([subtitle, category, durationText, ...paragraphs.slice(0, 3)].filter(Boolean).join(' '));
+  const evidence = clean([...(dateTexts.length ? dateTexts : listing.dateTexts || []), category, ageText, durationText, priceText].filter(Boolean).join(' | '));
+  const dates = occurrenceDates.length ? occurrenceDates : [null];
+  return dates.map((startDate, idx) => normalizeEvent({
+    source: 'echandole',
+    title,
+    startDate,
+    locationName: "Théâtre de L'Échandole",
+    locationText: "Théâtre de L'Échandole, Le Château, Yverdon-les-Bains",
+    city: 'Yverdon-les-Bains',
+    url: listing.url || $('link[rel="canonical"]').attr('href') || SOURCES.echandole.url,
+    description,
+    ageText,
+    priceText,
+    tags: inferTags(`${title} ${description} théâtre spectacle famille ${ageText}`),
+    evidence: evidence || clean($scope.text()).slice(0, 600),
+    sourceProvenance: `L'Échandole official agenda/detail page${idx > 0 ? ` occurrence ${idx + 1}` : ''}`
+  }));
+}
+
+async function scrapeEchandole() {
+  const html = await fetchHtml(SOURCES.echandole.url, 30000);
+  const listings = extractEchandoleListings(html, SOURCES.echandole.url);
+  const events = [];
+  for (const listing of listings) {
+    try {
+      const detailHtml = await fetchHtml(listing.url, 25000);
+      events.push(...parseEchandoleDetail(detailHtml, listing));
+    } catch (err) {
+      for (const dateText of listing.dateTexts || []) {
+        events.push(normalizeEvent({
+          source: 'echandole', title: listing.title, startDate: parseEchandoleDateText(dateText, 2026),
+          locationName: "Théâtre de L'Échandole", locationText: "Théâtre de L'Échandole, Le Château, Yverdon-les-Bains", city: 'Yverdon-les-Bains',
+          url: listing.url, description: listing.category || listing.rawText, ageText: listing.ageText || '', evidence: `Listing fallback: ${listing.rawText}`
+        }));
+      }
+      console.warn(`[echandole] detail fetch failed for ${listing.url}: ${err.message}`);
+    }
+  }
+  return uniqBy(events.filter(e => e.title && e.url && e.startDate), e => e.id);
+}
+
 function extractTheatreDuPassageDetailLinks(html, pageUrl = SOURCES.theatreDuPassage.listUrl) {
   const $ = cheerio.load(html);
   const links = new Map();
@@ -1535,7 +1621,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -1635,6 +1721,15 @@ function runFixtureTests() {
   assert.strictEqual(bennoEvents[0].startDate, '2026-11-11');
   assert.strictEqual(bennoEvents[0].ageText, 'DÈS 7 ANS');
   assert(bennoEvents[1].url.includes('#tente'), 'Benno fixture should create stable fragment URLs for unlinked cards');
+  const echandoleListings = extractEchandoleListings('<section class="event-item"><a href="https://echandole.ch/spectacles/lidole-des-petites-houles/"><div class="date"><span>dim 05.10.25</span></div><h2>L’idole des petites houles</h2><div class="infos category">Comme un poisson dans l\'eau</div><div class="infos">Dès 3 ans</div></a></section>', SOURCES.echandole.url);
+  assert.strictEqual(echandoleListings.length, 1);
+  const echandoleEvents = parseEchandoleDetail('<main class="single-event"><h1>L’idole des petites houles</h1><p>La toute petite compagnie</p><div class="date full-event">dim 05.10.25 11:00</div><div class="date">dim 05.10.25 14:00</div><div class="infos category">Comme un poisson dans l\'eau</div><div class="infos">Dès 3 ans</div><div class="infos time">40 min</div><div class="infos">Tarif unique 15.- | CarteCulture 10.- | Passculture 5.-</div><p class="wp-block-paragraph">Campés sur leur navire de théâtre, trois marins racontent la vie d’un petit poisson.</p></main>', echandoleListings[0]);
+  assert.strictEqual(echandoleEvents.length, 2);
+  assert.strictEqual(echandoleEvents[0].source, 'echandole');
+  assert.strictEqual(echandoleEvents[0].startDate, '2025-10-05T11:00:00+02:00');
+  assert.strictEqual(echandoleEvents[0].city, 'Yverdon-les-Bains');
+  assert.strictEqual(echandoleEvents[0].ageMin, 3);
+  assert(echandoleEvents[0].priceText.includes('15.-'), 'Échandole fixture should keep tariff evidence');
   const lePommierListings = extractLePommierListings('<div class="eventv2-grid"><a href="https://lepommier.ch/event/981-puisque-cest-comme-ca-je-vais-faire-un-opera-toute-seule" class="grid-item" data-date="1800144000"><div class="content" title="Puisque c’est comme ça je vais faire un opéra toute seule"><div class="date">Le 17 Jan.</div><div class="type">Théâtre</div></div></a></div>', SOURCES.lePommier.url);
   assert.strictEqual(lePommierListings.length, 1);
   const lePommierEvents = parseLePommierDetail('<main><h1>Puisque c’est comme ça je vais faire un opéra toute seule</h1><p>Informations Auteur / Autrice Claire Diterzi Genre Théâtre Type d\'événement Jeune public Age conseillé Dès 5 ans Durée 45 minutes Made in France Lieu Le Pommier Rue du Pommier 9 2000 Neuchâtel Billetterie Opéra Mode d’emploi (pour toute la famille) Les horaires et tarifs Dimanche 17 janvier 2027 à 10 h 30 Dimanche 17 janvier 2027 à 16 h 00 Jeune public Tarif unique : 15 CHF Abonnement de saison, découverte et jeune public : gratuit Distribution</p></main>', lePommierListings[0]);
@@ -1704,4 +1799,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
