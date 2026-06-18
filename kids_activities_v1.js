@@ -62,6 +62,11 @@ const SOURCES = {
     url: 'https://www.vallorbe.ch/agenda?datumVon=11.06.2026&datumBis=21.06.2027',
     kind: 'iweb-communal-agenda'
   },
+  sainteCroix: {
+    url: 'https://www.sainte-croix.ch/evenements?datumVon=18.06.2026&datumBis=18.06.2027',
+    baseUrl: 'https://www.sainte-croix.ch',
+    kind: 'iweb-communal-cultural-agenda'
+  },
   tempsLibre: {
     url: 'https://www.tempslibre.ch/romandie/evenements/ce-week-end',
     kind: 'romandie-cultural-weekend-agenda'
@@ -851,6 +856,108 @@ async function scrapeVallorbe() {
         source: 'vallorbe', title: item.title, startDate: item.startDate, endDate: item.endDate,
         locationText: item.locationText, city: item.city, url: item.url, description: item.organizer,
         evidence: clean([item.title, item.startDate, item.endDate, item.locationText, item.organizer].filter(Boolean).join(' | '))
+      }));
+    }
+  }
+  return events;
+}
+
+
+function sainteCroixEventUrl(id) {
+  return canonicalUrl(`/evenements/${id}`, SOURCES.sainteCroix.baseUrl);
+}
+
+function iwebTimestampToZurichIso(value) {
+  if (!value) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const d = new Date(n);
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false
+  }).formatToParts(d).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+  const date = `${parts.year}-${parts.month}-${parts.day}`;
+  if (parts.hour === '00' && parts.minute === '00') return date;
+  return `${date}T${parts.hour}:${parts.minute}:00${zurichOffsetForDate(date)}`;
+}
+
+function extractSainteCroixListings(html) {
+  const $ = cheerio.load(html);
+  const attr = $('#anlassList').attr('data-entities');
+  if (!attr) return [];
+  const payload = JSON.parse(attr);
+  return (payload.data || []).map(row => {
+    const name$ = cheerio.load(row.name || '');
+    const title = clean(name$.text() || row.name);
+    const link = name$('a').attr('href');
+    const location = clean(cheerio.load(row.lokalitaet || '').text() || row.lokalitaet || 'Sainte-Croix');
+    const organizer = clean(cheerio.load(row.organisator || '').text() || row.organisator || '');
+    const startDate = iwebTimestampToZurichIso(row.datumVon || row._datumVon || row['datumVon-sort']);
+    const endDate = iwebTimestampToZurichIso(row.datumBis || row._datumBis || row['datumBis-sort']);
+    const iconText = clean(row.hauptkategorieId || '').match(/cms-icon-([a-z-]+)/)?.[1] || '';
+    return {
+      id: row.id,
+      title,
+      url: sainteCroixEventUrl(row.id) || canonicalUrl(link, SOURCES.sainteCroix.url),
+      startDate,
+      endDate: endDate && endDate !== startDate ? endDate : null,
+      locationText: location,
+      city: cityFromLocation(location, 'Sainte-Croix'),
+      organizer,
+      category: iconText
+    };
+  }).filter(x => x.id && x.title && x.startDate);
+}
+
+function parseSainteCroixDateTime(text, fallbackDate) {
+  const date = parseFrenchDate(text, 2026) || parseNumericDate(text, 2026) || (fallbackDate || '').slice(0, 10);
+  return isoDateZurich(date, text);
+}
+
+function parseSainteCroixDetail(html, fallback = {}) {
+  const $ = cheerio.load(html);
+  $('script, style, nav, header, footer').remove();
+  const title = clean($('main h1, h1').first().text()) || fallback.title;
+  const mainText = clean($('main').first().text()) || clean($('body').text());
+  const locationLine = (mainText.match(new RegExp(`(?:${fallback.locationText ? fallback.locationText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : 'Sainte-Croix'})(?:[^|]{0,120}?)(?:\\d{4}\\s+Sainte-Croix)?`, 'i')) || [])[0];
+  const location = clean(locationLine || fallback.locationText || 'Sainte-Croix');
+  const dateLine = (mainText.match(new RegExp(`\\d{1,2}\\s+(?:${MONTH_RE})\\.?\\s+\\d{4}(?:,?\\s*\\d{1,2}h\\d{0,2})?`, 'i')) || [])[0] || '';
+  const price = extractAfter('Prix', mainText, ['Contact', 'Organisateur', 'Organisation', 'Affiche']) || (/entr[ée]e libre|gratuit/i.test(mainText) ? (mainText.match(/entr[ée]e libre|gratuit[e]?/i) || [''])[0] : '');
+  const description = clean(mainText
+    .replace(/^.*?Contenu principal/i, '')
+    .replace(title, '')
+    .replace(/Afficher le menu/i, '')
+    .replace(dateLine, '')
+  ).slice(0, 900);
+  const evidence = clean([title, dateLine || fallback.startDate, location, fallback.organizer, fallback.category, price, description].filter(Boolean).join(' | '));
+  return normalizeEvent({
+    source: 'sainteCroix',
+    title,
+    startDate: dateLine ? parseSainteCroixDateTime(dateLine, fallback.startDate) : fallback.startDate,
+    endDate: fallback.endDate || null,
+    locationName: location.split(/Av\.|Avenue|Rue|Route|Place|\d{4}/)[0],
+    locationText: location,
+    city: cityFromLocation(location, fallback.city || 'Sainte-Croix'),
+    url: fallback.url || sainteCroixEventUrl(fallback.id),
+    description: description || fallback.organizer || title,
+    priceText: price,
+    ageText: /familles?|enfants?|jeunesse|tout public|jeux|atelier|cin[ée]|f[êe]te|festival/i.test(evidence) ? 'famille / tout public possible' : '',
+    evidence
+  });
+}
+
+async function scrapeSainteCroix() {
+  const html = await fetchHtml(SOURCES.sainteCroix.url, 30000);
+  const listings = extractSainteCroixListings(html);
+  const events = [];
+  for (const item of listings) {
+    try {
+      const detailHtml = await fetchHtml(item.url, 25000);
+      events.push(parseSainteCroixDetail(detailHtml, item));
+    } catch (e) {
+      events.push(normalizeEvent({
+        source: 'sainteCroix', title: item.title, startDate: item.startDate, endDate: item.endDate,
+        locationText: item.locationText, city: item.city, url: item.url, description: item.organizer,
+        evidence: clean([item.title, item.startDate, item.endDate, item.locationText, item.organizer, item.category].filter(Boolean).join(' | '))
       }));
     }
   }
@@ -1758,7 +1865,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -1838,6 +1945,15 @@ function runFixtureTests() {
   assert.strictEqual(vallorbeEvent.source, 'vallorbe');
   assert.strictEqual(vallorbeEvent.startDate, '2026-08-31T18:30:00+02:00');
   assert.strictEqual(vallorbeEvent.city, 'Vallorbe');
+  const sainteEntities = JSON.stringify({ data: [{ id: '6986620', name: '<a href="/_rte/anlass/6986620">Cinéma Royal - Journée des Réfugié.es</a>', lokalitaet: 'Cinéma Royal', datumVon: '1781906400000', datumBis: '1781906400000', organisator: 'Cinéma Royal', hauptkategorieId: '<svg class="cms-icon cms-icon-art"></svg>' }] }).replace(/"/g, '&quot;');
+  const sainteRows = extractSainteCroixListings(`<table id="anlassList" data-entities="${sainteEntities}"></table>`);
+  assert.strictEqual(sainteRows.length, 1);
+  assert.strictEqual(sainteRows[0].startDate, '2026-06-20');
+  const sainteEvent = parseSainteCroixDetail('<main><h1>Cinéma Royal - Journée des Réfugié.es</h1>Cinéma Royal Av. de la Gare 2 1450 Sainte-Croix 20 juin 2026, 16h00 animations en entrée libre, danses, chants, exposition et plats traditionnels.</main>', sainteRows[0]);
+  assert.strictEqual(sainteEvent.source, 'sainteCroix');
+  assert.strictEqual(sainteEvent.city, 'Sainte-Croix');
+  assert.strictEqual(sainteEvent.startDate, '2026-06-20T16:00:00+02:00');
+  assert(sainteEvent.priceText.match(/entrée libre/i), 'Sainte-Croix fixture should keep free-entry evidence');
   const tempsLibreListings = extractTempsLibreListings('<a class="container-link" href="/vaud/manifestations/449853-dans-la-peau-des-mangakas" title="Dans la peau des mangakas"><article><div class="exergue date"><div class="dark"><span class="day">14</span><span class="month-year">juin 2026</span></div></div><p class="categories"><strong>Ateliers</strong></p><h3>Dans la peau des mangakas</h3><p class="teaser">Atelier créatif manga</p><p class="place"><strong>Musée romain de Lausanne-Vidy</strong>, Lausanne</p><ul class="tagInfos"><li class="free">Gratuit</li></ul></article></a>', SOURCES.tempsLibre.url);
   assert.strictEqual(tempsLibreListings.length, 1);
   const tempsLibreEvent = parseTempsLibreDetail('<head><link rel="canonical" href="https://www.tempslibre.ch/vaud/manifestations/449853-dans-la-peau-des-mangakas"><script>window.dataLayer = window.dataLayer || []; window.dataLayer.push({"pageSection":"manifestations","pageCategories":["Manifestations","Ateliers"],"city":"Lausanne","canton":"vaud","public":["6 à 12 ans","Adolescents"]});</script><script type="application/ld+json">{"@context":"http://schema.org","@type":"Event","name":"Dans la peau des mangakas","description":"Atelier manga pour enfants","startDate":"2026-06-14 15:00","endDate":"2026-06-14 16:00","url":"https://www.tempslibre.ch/vaud/manifestations/449853-dans-la-peau-des-mangakas","location":{"@type":"Place","name":"Musée romain de Lausanne-Vidy","address":"Ch. du Bois-de-Vaux 24, Lausanne, CH"}}</script></head><main><h1>Dans la peau des mangakas</h1><p>Gratuit, réservation conseillée.</p></main>', tempsLibreListings[0]);
@@ -1946,4 +2062,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
