@@ -21,6 +21,7 @@ const LOCATION_KM_FROM_YVERDON = {
   yvonand: 10,
   orbe: 12,
   vallorbe: 23,
+  champvent: 8,
   'sainte-croix': 23,
   lausanne: 39,
   morat: 38,
@@ -66,6 +67,13 @@ const SOURCES = {
     url: 'https://www.sainte-croix.ch/evenements?datumVon=18.06.2026&datumBis=18.06.2027',
     baseUrl: 'https://www.sainte-croix.ch',
     kind: 'iweb-communal-cultural-agenda'
+  },
+  champvent: {
+    url: 'https://champvent.ch/actualite',
+    manifestationsUrl: 'https://champvent.ch/manifestations',
+    olderUrl: 'https://champvent.ch/index.php?p=1_9&pid=2',
+    baseUrl: 'https://champvent.ch',
+    kind: 'communal-news-and-manifestations'
   },
   tempsLibre: {
     url: 'https://www.tempslibre.ch/romandie/evenements/ce-week-end',
@@ -1124,6 +1132,124 @@ function isoDateZurich(date, time = '') {
 }
 
 
+
+function champventEventLike(text = '') {
+  return /f[êe]te|manifest|spectacle|th[ée][âa]tre|tour de romandie|\bvente\b|tracteur|chasse aux|fondue|village|bal|repas|d[îi]ner|jeunesse|concert|programme|soir[ée]e|march[ée]|vin|soutien|enfants?|animation|buvette|gratuit|famille/i.test(clean(text));
+}
+
+function parseChampventDateRanges(text, fallbackYear = 2026) {
+  const t = clean(text).replace(/1er/g, '1');
+  const out = [];
+  const pushRange = (startDay, endDay, monthName, year, raw) => {
+    const month = MONTHS[clean(monthName).toLowerCase().replace(/\.$/, '')];
+    if (!month) return;
+    const y = String(year || fallbackYear);
+    out.push({ startDate: `${y}-${month}-${String(startDay).padStart(2, '0')}`, endDate: `${y}-${month}-${String(endDay).padStart(2, '0')}`, dateText: clean(raw) });
+  };
+  const rangeRe = new RegExp(`(?:du\\s+(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)?\\s*)?(\\d{1,2})\\s*(?:-|–|au)\\s*(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)?\\s*(\\d{1,2})\\s+(${MONTH_RE})\\.?(?:\\s+(\\d{4}))?`, 'gi');
+  for (const m of t.matchAll(rangeRe)) pushRange(m[1], m[2], m[3], m[4], m[0]);
+  const masked = t.replace(rangeRe, ' ');
+  const singleRe = new RegExp(`(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)?\\s*(\\d{1,2})\\s+(${MONTH_RE})\\.?(?:\\s+(\\d{4}))?`, 'gi');
+  for (const m of masked.matchAll(singleRe)) {
+    const month = MONTHS[m[2].toLowerCase().replace(/\.$/, '')];
+    if (!month) continue;
+    const y = String(m[3] || fallbackYear);
+    out.push({ startDate: `${y}-${month}-${m[1].padStart(2, '0')}`, endDate: null, dateText: clean(m[0]) });
+  }
+  return uniqBy(out, r => `${r.startDate}|${r.endDate || ''}`);
+}
+
+function extractChampventNewsListings(html, pageUrl = SOURCES.champvent.url) {
+  const $ = cheerio.load(html);
+  const listings = [];
+  $('.itemList').each((_, item) => {
+    const title = clean($(item).find('.itemTitle').first().text());
+    const status = clean($(item).find('.itemStatus').first().text());
+    const description = clean($(item).find('.itemDescription').first().text());
+    const href = $(item).find('a[href]').first().attr('href');
+    const url = canonicalUrl(href || '', pageUrl);
+    if (!title || !url || !champventEventLike(`${title} ${description} ${status}`)) return;
+    const fallbackYear = Number((parseFrenchDate(status, 2026) || '2026').slice(0, 4));
+    const dateRanges = parseChampventDateRanges(`${title}. ${description}`, fallbackYear);
+    listings.push({ title, url, status, description, fallbackYear, dateRanges, provenance: pageUrl });
+  });
+  return uniqBy(listings, l => l.url);
+}
+
+function extractChampventManifestationRows(html, pageUrl = SOURCES.champvent.manifestationsUrl) {
+  const $ = cheerio.load(html);
+  const rows = [];
+  $('ul.koCheckList li').each((_, li) => {
+    const text = clean($(li).text());
+    const parts = text.split('|').map(clean).filter(Boolean);
+    if (parts.length < 2) return;
+    const dateText = parts[0];
+    const title = parts[1];
+    const organizer = parts.slice(2).join(' | ');
+    const ranges = parseChampventDateRanges(dateText, 2026);
+    for (const range of ranges) rows.push({ title, organizer, dateText, ...range, url: `${pageUrl}#${sha(text)}`, provenance: pageUrl, description: text });
+  });
+  return rows;
+}
+
+function parseChampventNewsDetail(html, listing) {
+  const $ = cheerio.load(html);
+  $('script,style,svg,noscript').remove();
+  const title = clean($('h1.editorjsH1').first().text() || $('h1').first().text() || listing.title);
+  const status = clean($('.itemStatus').first().text() || listing.status || '');
+  const fallbackYear = Number((parseFrenchDate(status, listing.fallbackYear || 2026) || `${listing.fallbackYear || 2026}`).slice(0, 4));
+  const blocks = $('.ce-block__content, .ce-block').map((_, el) => clean($(el).text())).get().filter(Boolean);
+  const description = clean(blocks.join(' ') || listing.description || $('main').text()).slice(0, 900);
+  const ranges = parseChampventDateRanges(description || `${title}. ${listing.description}`, fallbackYear);
+  const dateRanges = ranges.length ? ranges : listing.dateRanges || [];
+  const priceText = /gratuit|totalement gratuits?|entr[ée]e libre|sans inscription/i.test(description) ? clean((description.match(/(?:totalement\s+)?gratuits?|entrée libre|sans inscription(?: nécessaire)?/i) || ['Gratuit / sans inscription'])[0]) : '';
+  const locationMatch = description.match(/(?:à la|au|aux|lieu|se déroulera(?: au| à la)?)\s+([^\.]{5,120}?(?:Champvent|Saint-Christophe|Essert-sous-Champvent|Villars-sous-Champvent))/i);
+  const locationText = clean(locationMatch ? locationMatch[1] : 'Champvent');
+  return dateRanges.map((range, idx) => normalizeEvent({
+    source: 'champvent', title, startDate: range.startDate, endDate: range.endDate,
+    locationName: locationText, locationText, city: /Saint-Christophe/i.test(locationText) ? 'Champvent' : cityFromLocation(locationText, 'Champvent'),
+    url: `${listing.url}${idx ? `#${range.startDate}` : ''}`,
+    description, ageText: /enfants?|famille/i.test(description) ? 'famille / enfants' : '', priceText,
+    sourceProvenance: `Commune de Champvent actualité: ${listing.url}`,
+    evidence: clean(`${range.dateText || ''} ${status} ${description}`)
+  }));
+}
+
+async function scrapeChampvent() {
+  const [currentHtml, olderHtml, manifestationsHtml] = await Promise.all([
+    fetchHtml(SOURCES.champvent.url, 30000),
+    fetchHtml(SOURCES.champvent.olderUrl, 30000).catch(() => ''),
+    fetchHtml(SOURCES.champvent.manifestationsUrl, 30000)
+  ]);
+  const events = extractChampventManifestationRows(manifestationsHtml).map(row => normalizeEvent({
+    source: 'champvent', title: row.title, startDate: row.startDate, endDate: row.endDate,
+    locationName: 'Champvent', locationText: ['Champvent', row.organizer].filter(Boolean).join(', '), city: 'Champvent', url: row.url,
+    description: row.description, ageText: champventEventLike(row.description) && /jeunesse|th[ée][âa]tre|tracteur|vente|village/i.test(row.description) ? 'tout public / village' : '',
+    sourceProvenance: `Commune de Champvent manifestations: ${SOURCES.champvent.manifestationsUrl}`,
+    evidence: row.description
+  }));
+  const listings = uniqBy([
+    ...extractChampventNewsListings(currentHtml, SOURCES.champvent.url),
+    ...(olderHtml ? extractChampventNewsListings(olderHtml, SOURCES.champvent.olderUrl) : [])
+  ], l => l.url);
+  for (const listing of listings) {
+    try {
+      const html = await fetchHtml(listing.url, 25000);
+      events.push(...parseChampventNewsDetail(html, listing));
+    } catch (err) {
+      for (const range of listing.dateRanges || []) events.push(normalizeEvent({
+        source: 'champvent', title: listing.title, startDate: range.startDate, endDate: range.endDate,
+        locationName: 'Champvent', locationText: 'Champvent', city: 'Champvent', url: listing.url,
+        description: listing.description, sourceProvenance: `Commune de Champvent actualité listing: ${listing.provenance}`,
+        evidence: `${listing.status} ${listing.description}`
+      }));
+      console.warn(`[champvent] detail fetch failed for ${listing.url}: ${err.message}`);
+    }
+  }
+  return uniqBy(events.filter(e => e.title && e.startDate && e.url), e => recommendationKey(e));
+}
+
+
 function extractLePommierListings(html, pageUrl = SOURCES.lePommier.url) {
   const $ = cheerio.load(html);
   const listings = [];
@@ -1865,7 +1991,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -2001,6 +2127,18 @@ function runFixtureTests() {
   assert.strictEqual(lePommierEvents[0].startDate, '2027-01-17T10:30:00+02:00');
   assert.strictEqual(lePommierEvents[0].ageMin, 5);
   assert(lePommierEvents[0].priceText.includes('15 CHF'), 'Le Pommier fixture should keep tariff evidence');
+  const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
+  assert.strictEqual(champventRows.length, 2);
+  assert.strictEqual(champventRows[0].startDate, '2026-05-01');
+  assert.strictEqual(champventRows[0].endDate, '2026-05-03');
+  const champventListing = extractChampventNewsListings('<div class="itemList"><a href="actualite/chasse-aux-oeufs-a-champvent"><div class="itemTitle">Chasse aux oeufs à Champvent</div><div class="itemStatus">Mercredi, 25 Mars 2026</div><div class="itemDescription">Une activité pour les enfants. Gratuit.</div></a></div>', SOURCES.champvent.url);
+  assert.strictEqual(champventListing.length, 1);
+  const champventEvents = parseChampventNewsDetail('<main><h1 class="editorjsH1">Chasse aux oeufs à Champvent</h1><div class="itemStatus">Mercredi, 25 Mars 2026</div><div class="ce-block__content">La Chasse se déroulera le dimanche de Pâques, le 5 avril 2026, à la Ferme Olivier Chautems, chemin des Dumières, à Champvent. Les jeux sont totalement gratuits, sans inscription nécessaire et un petit cadeau sera offert à chaque enfant participant.</div></main>', champventListing[0]);
+  assert.strictEqual(champventEvents.length, 1);
+  assert.strictEqual(champventEvents[0].source, 'champvent');
+  assert.strictEqual(champventEvents[0].startDate, '2026-04-05');
+  assert.strictEqual(champventEvents[0].city, 'Champvent');
+  assert(champventEvents[0].priceText.match(/gratuit/i), 'Champvent fixture should keep free evidence');
   const manual = loadManualJohanEvents();
   assert(manual.events.length >= 8, 'manualJohan source should load Johan-provided events');
   assert(manual.events.some(e => e.title === 'Tu comprendras quand tu seras grand' && e.startDate.startsWith('2026-10-25T11:00:00')), 'manualJohan should include theatre programme OCR/official entries');
@@ -2062,4 +2200,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
