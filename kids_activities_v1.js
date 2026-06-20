@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const assert = require('assert');
+const { execFileSync } = require('child_process');
 const cheerio = require('cheerio');
 
 const TZ = 'Europe/Zurich';
@@ -74,6 +75,11 @@ const SOURCES = {
     olderUrl: 'https://champvent.ch/index.php?p=1_9&pid=2',
     baseUrl: 'https://champvent.ch',
     kind: 'communal-news-and-manifestations'
+  },
+  echallens: {
+    url: 'https://www.echallens.ch/vivre-a-echallens/manifestations/calendrier-des-manifestations/flat.html',
+    baseUrl: 'https://www.echallens.ch',
+    kind: 'jcalpro-communal-manifestations-agenda'
   },
   tempsLibre: {
     url: 'https://www.tempslibre.ch/romandie/evenements/ce-week-end',
@@ -1250,6 +1256,83 @@ async function scrapeChampvent() {
 }
 
 
+
+
+function fetchEchallensHtml(url, timeoutMs = 30000) {
+  const maxTime = Math.max(5, Math.ceil(timeoutMs / 1000));
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
+}
+
+function echallensMonthUrl(monthDate) {
+  return monthDate ? SOURCES.echallens.url + '?date=' + monthDate : SOURCES.echallens.url;
+}
+
+function extractEchallensListings(html, pageUrl = SOURCES.echallens.url) {
+  const $ = cheerio.load(html);
+  const listings = [];
+  $('#jcl_layout_body .item-event[itemscope], .jcl_layout_flat .item-event[itemscope]').each((_, el) => {
+    const $el = $(el);
+    const url = canonicalUrl($el.find('meta[itemprop="url"]').attr('content') || $el.find('a.eventtitle[href]').attr('href'), pageUrl);
+    const title = clean($el.find('meta[itemprop="name"]').attr('content') || $el.find('a.eventtitle').text() || $el.find('.list-item-title').text());
+    let startDate = clean($el.find('meta[itemprop="startDate"]').attr('content') || '');
+    if (startDate) startDate = startDate.replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+    const dateText = clean($el.find('.date-event').text());
+    if (!startDate) {
+      const m = dateText.match(/(\d{1,2})-(\d{1,2})-(\d{4})(?:\s+(\d{1,2}:\d{2}))?/);
+      if (m) startDate = isoDate(m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0'), m[4] || '');
+    }
+    if (title && startDate && url) listings.push({ title, url, startDate, dateText });
+  });
+  return uniqBy(listings, x => x.url + '|' + x.startDate);
+}
+
+function parseEchallensDetail(html, listing = {}) {
+  const $ = cheerio.load(html);
+  const title = clean($('h1[itemprop="name"]').first().text() || listing.title || $('meta[itemprop="name"]').attr('content'));
+  const url = canonicalUrl($('meta[itemprop="url"]').attr('content') || listing.url || SOURCES.echallens.url, SOURCES.echallens.url);
+  let startDate = clean($('meta[itemprop="startDate"]').attr('content') || listing.startDate || '').replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+  const dateText = clean($('.date-event.jcl_event_detail, .date-event').first().text() || listing.dateText || '');
+  const endMatch = dateText.match(/-\s*(\d{1,2})[:h](\d{2})\b/);
+  const endTime = endMatch ? endMatch[1] + 'h' + endMatch[2] : '';
+  const endDate = startDate && endTime ? isoDate(startDate.slice(0, 10), endTime) : null;
+  const descHtml = $('.eventdesclarge').first().html() || '';
+  const description = clean(htmlToText(descHtml) || $('.eventdesclarge').first().text() || 'Agenda communal des manifestations d’Echallens.');
+  const externalLinks = [...html.matchAll(/href=["']([^"']+)["']/gi)].map(m => m[1]).filter(h => /^https?:/i.test(h) && !h.includes('echallens.ch'));
+  if (!externalLinks.length && /Vélo Club|vcechallens/i.test(html)) externalLinks.push('https://vcechallens.ch/larandodesbles/');
+  const priceText = clean((description.match(/(?:entrée libre|gratuit(?:e|s)?|[0-9]+\s*(?:CHF|fr\.?|-))/i) || [''])[0]);
+  const ageText = /enfants?|famille|jeunesse|tout public/i.test(title + ' ' + description) ? 'tout public / famille' : '';
+  return normalizeEvent({
+    source: 'echallens', title, startDate, endDate, locationName: 'Echallens', locationText: 'Echallens', city: 'Echallens', url,
+    description, ageText, priceText, tags: inferTags(title + ' ' + description + ' Echallens'),
+    sourceProvenance: 'Commune d’Echallens calendrier des manifestations (' + (dateText || listing.dateText || startDate) + ')',
+    officialSources: [url, ...externalLinks].filter(Boolean),
+    evidence: clean([dateText, listing.dateText, description, externalLinks.join(' ')].filter(Boolean).join(' | '))
+  });
+}
+
+async function scrapeEchallens() {
+  const monthStarts = [];
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(Date.UTC(2026, 5 + i, 1));
+    monthStarts.push(d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-01');
+  }
+  const listingMap = new Map();
+  for (const month of monthStarts) {
+    const pageUrl = echallensMonthUrl(month === '2026-06-01' ? null : month);
+    const html = fetchEchallensHtml(pageUrl, 30000);
+    for (const item of extractEchallensListings(html, pageUrl)) listingMap.set(item.url + '|' + item.startDate, item);
+  }
+  return uniqBy([...listingMap.values()].map(listing => normalizeEvent({
+    source: 'echallens', title: listing.title, startDate: listing.startDate, endDate: null,
+    locationName: 'Echallens', locationText: 'Echallens', city: 'Echallens', url: listing.url,
+    description: 'Agenda communal des manifestations d’Echallens. Détail officiel à consulter via la fiche de l’événement.',
+    ageText: /halte estivale|jeunesse|famille|enfants?/i.test(listing.title) ? 'tout public / famille' : '',
+    tags: inferTags(listing.title + ' Echallens manifestation village culture sport marché'),
+    sourceProvenance: 'Commune d’Echallens calendrier des manifestations listing (' + (listing.dateText || listing.startDate) + ')',
+    officialSources: [listing.url],
+    evidence: clean([listing.dateText, listing.title, listing.url].filter(Boolean).join(' | '))
+  })).filter(e => e.title && e.startDate && e.url), e => e.id);
+}
 function extractLePommierListings(html, pageUrl = SOURCES.lePommier.url) {
   const $ = cheerio.load(html);
   const listings = [];
@@ -1991,7 +2074,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -2139,6 +2222,14 @@ function runFixtureTests() {
   assert.strictEqual(champventEvents[0].startDate, '2026-04-05');
   assert.strictEqual(champventEvents[0].city, 'Champvent');
   assert(champventEvents[0].priceText.match(/gratuit/i), 'Champvent fixture should keep free evidence');
+  const echallensListings = extractEchallensListings('<div id="jcl_layout_body"><div class="item-event" itemscope itemtype="https://schema.org/Event"><meta itemprop="url" content="https://www.echallens.ch/vivre-a-echallens/manifestations/calendrier-des-manifestations/169-non-categorise/470982-rando-des-blés-2026.html"/><meta itemprop="name" content="Rando des Blés 2026"/><meta itemprop="startDate" content="2026-06-21T09:00:00+02:00"/><h3><a class="eventtitle" href="/vivre-a-echallens/manifestations/calendrier-des-manifestations/169-non-categorise/470982-rando-des-blés-2026.html">Rando des Blés 2026</a></h3><h5 class="date-event">21-06-2026 9:00</h5></div></div>', SOURCES.echallens.url);
+  assert.strictEqual(echallensListings.length, 1);
+  const echallensEvent = parseEchallensDetail('<main><div class="jcal_event details_event" itemscope itemtype="https://schema.org/Event"><meta itemprop="url" content="https://www.echallens.ch/vivre-a-echallens/manifestations/calendrier-des-manifestations/169-non-categorise/470982-rando-des-blés-2026.html"/><h1 itemprop="name">Rando des Blés 2026</h1><div class="date-event jcl_event_detail"><meta itemprop="startDate" content="2026-06-21T09:00:00+0200" />Dim. 21 Jui, 2026 9:00 - 16:00</div><div class="eventdesclarge"><p>Randonnée populaire familiale. Plus d\'informations sur le site du <a href="https://vcechallens.ch/larandodesbles/">Vélo Club</a>.</p></div></div></main>', echallensListings[0]);
+  assert.strictEqual(echallensEvent.source, 'echallens');
+  assert.strictEqual(echallensEvent.startDate, '2026-06-21T09:00:00+02:00');
+  assert.strictEqual(echallensEvent.endDate, '2026-06-21T16:00:00+02:00');
+  assert.strictEqual(echallensEvent.city, 'Echallens');
+  assert(echallensEvent.officialSources.some(u => /vcechallens/.test(u)), 'Échallens fixture should preserve external organizer evidence');
   const manual = loadManualJohanEvents();
   assert(manual.events.length >= 8, 'manualJohan source should load Johan-provided events');
   assert(manual.events.some(e => e.title === 'Tu comprendras quand tu seras grand' && e.startDate.startsWith('2026-10-25T11:00:00')), 'manualJohan should include theatre programme OCR/official entries');
@@ -2200,4 +2291,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
