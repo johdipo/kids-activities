@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-06-20T15:23:10Z",
+  "updatedAt": "2026-06-20T15:27:00Z",
   "purpose": "Prioritised nearby theatre and family/young-public sources to promote into structured scrapers when they prove parseable. URLs were web_fetch-checked on 2026-06-12; use root URLs when a guessed deep link returned 404/500.",
   "sources": [
     {
@@ -87,8 +87,8 @@
       "status": "candidate-root-verified",
       "url": "https://aulac-grandson.ch",
       "city": "Grandson",
-      "familyRelevance": "Medium-high: local lakeside programme (1er juin–19 juillet 2026) with family-friendly outdoor events, food, concerts, and activities such as sailing initiation; added from Johan’s photo, not only as the 21 June event.",
-      "implementationNotes": "Root page verified on 2026-06-20. Investigate programme/event data on the site before adding a scraper; keep Johan’s flyer photo as discovery provenance for the 2026 season.",
+      "familyRelevance": "High local relevance: Au Lac Grandson publishes a full summer programme on the Quais de Grandson (1er juin–19 juillet 2026), with family-friendly outdoor events, food, concerts, lake activities and recurring opportunities; added from Johan’s photo as an ongoing summer information source, not a one-off 21 June event.",
+      "implementationNotes": "Treat as a full-season/summer programme source. Root page verified on 2026-06-20; next step is to inspect the programme/event data on the site and add a scraper or recurring manual import if parseable. Keep Johan’s flyer photo as discovery provenance for the 2026 season.",
       "verifiedAt": "2026-06-20T15:23:10Z"
     }
   ]
