@@ -16,6 +16,7 @@ node_modules/
 automation/out/
 automation/tmp/
 automation/logs/
+automation/state/
 
 # Sensitive
 .env

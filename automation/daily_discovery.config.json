@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "search": {
+    "provider": "duckduckgo-html",
+    "maxResultsPerQuery": 8,
+    "timeoutMs": 15000,
+    "minDelayMs": 1200
+  },
+  "locations": [
+    "Yverdon-les-Bains",
+    "Yverdon et région",
+    "Grandson",
+    "Neuchâtel",
+    "Lausanne",
+    "Orbe",
+    "Payerne",
+    "Estavayer",
+    "Morges",
+    "Vevey",
+    "Montreux",
+    "Vaud",
+    "Arc jurassien",
+    "Romandie"
+  ],
+  "intents": [
+    "événement famille enfants",
+    "agenda enfants",
+    "atelier enfants",
+    "spectacle famille",
+    "festival famille",
+    "sortie enfants"
+  ],
+  "notes": "Discovery candidates are review-only. Do not auto-publish to Telegram or import into source-candidates/manual-events without human/agent review."
+}
