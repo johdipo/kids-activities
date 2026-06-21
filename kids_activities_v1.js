@@ -24,6 +24,16 @@ const LOCATION_KM_FROM_YVERDON = {
   vallorbe: 23,
   champvent: 8,
   'sainte-croix': 23,
+  echallens: 18,
+  assens: 22,
+  bercher: 15,
+  sottens: 21,
+  sugnen: 14,
+  sugnens: 14,
+  'poliez-pittet': 19,
+  froideville: 28,
+  goumoens: 18,
+  'goumoens-la-ville': 18,
   lausanne: 39,
   morat: 38,
   morges: 48,
@@ -80,6 +90,11 @@ const SOURCES = {
     url: 'https://www.echallens.ch/vivre-a-echallens/manifestations/calendrier-des-manifestations/flat.html',
     baseUrl: 'https://www.echallens.ch',
     kind: 'jcalpro-communal-manifestations-agenda'
+  },
+  echallensTourisme: {
+    url: 'https://echallens-tourisme.ch/evenements/',
+    baseUrl: 'https://echallens-tourisme.ch',
+    kind: 'regional-tourism-events-agenda'
   },
   tempsLibre: {
     url: 'https://www.tempslibre.ch/romandie/evenements/ce-week-end',
@@ -1333,6 +1348,111 @@ async function scrapeEchallens() {
     evidence: clean([listing.dateText, listing.title, listing.url].filter(Boolean).join(' | '))
   })).filter(e => e.title && e.startDate && e.url), e => e.id);
 }
+
+function parseEchallensTourismeDateRange(text, fallbackYear = 2026) {
+  const t = clean(text).toLowerCase();
+  const fullRange = t.match(new RegExp('(\\d{1,2})\\s+(' + MONTH_RE + ')\\s+au\\s+(\\d{1,2})\\s+(' + MONTH_RE + ')(?:\\s+(\\d{4}))?', 'i'));
+  if (fullRange) {
+    const year = fullRange[5] || String(fallbackYear);
+    return {
+      startDate: `${year}-${MONTHS[fullRange[2]]}-${fullRange[1].padStart(2, '0')}`,
+      endDate: `${year}-${MONTHS[fullRange[4]]}-${fullRange[3].padStart(2, '0')}`
+    };
+  }
+  const sameMonthRange = t.match(new RegExp('(\\d{1,2})\\s+au\\s+(\\d{1,2})\\s+(' + MONTH_RE + ')(?:\\s+(\\d{4}))?', 'i'));
+  if (sameMonthRange) {
+    const year = sameMonthRange[4] || String(fallbackYear);
+    return {
+      startDate: `${year}-${MONTHS[sameMonthRange[3]]}-${sameMonthRange[1].padStart(2, '0')}`,
+      endDate: `${year}-${MONTHS[sameMonthRange[3]]}-${sameMonthRange[2].padStart(2, '0')}`
+    };
+  }
+  const single = parseFrenchDate(t, fallbackYear);
+  return { startDate: single, endDate: null };
+}
+
+function echallensTourismePageUrl(page = 1) {
+  return page <= 1 ? SOURCES.echallensTourisme.url : `${SOURCES.echallensTourisme.url}?_pagination=${page}`;
+}
+
+function extractEchallensTourismeListings(html, pageUrl = SOURCES.echallensTourisme.url) {
+  const $ = cheerio.load(html);
+  const listings = [];
+  $('article.wpgb-card').each((_, el) => {
+    const $el = $(el);
+    const url = canonicalUrl($el.find('h3 a[href], a.wpgb-card-layer-link[href]').first().attr('href'), pageUrl);
+    const title = clean($el.find('h3').first().text());
+    const dateText = clean($el.find('.date_event').first().text());
+    const placeText = clean($el.find('.lieu_event').first().text());
+    const { startDate, endDate } = parseEchallensTourismeDateRange(dateText, 2026);
+    const postId = (($el.attr('class') || '').match(/wpgb-post-(\d+)/) || [])[1] || '';
+    if (title && url && startDate) listings.push({ title, url, dateText, startDate, endDate, placeText, postId });
+  });
+  return uniqBy(listings, x => x.url + '|' + x.startDate);
+}
+
+function parseEchallensTourismeDetail(html, listing = {}) {
+  const $ = cheerio.load(html);
+  const $details = $('.event-details.details').first();
+  const title = clean($details.find('h2').first().text() || listing.title || $('title').text().replace(/- Echallens.*/i, ''));
+  const dateText = clean($details.find('h4').first().text() || listing.dateText || '');
+  const range = parseEchallensTourismeDateRange(dateText, 2026);
+  const description = clean($details.find('.description').text() || 'Événement régional relayé par Echallens Région Tourisme.');
+  const contactLines = [];
+  $details.find('.contact-infos p').each((_, p) => { const v = clean($(p).text()); if (v) contactLines.push(v); });
+  const locationText = contactLines.find(v => /\d{4}|place|rue|chemin|route|salle|église|eglise|collège|college/i.test(v)) || listing.placeText || '';
+  const city = cityFromLocation(`${locationText} ${listing.placeText}`, listing.placeText || 'Echallens');
+  const bodyClasses = clean($('body').attr('class') || '');
+  const publicTerms = [...bodyClasses.matchAll(/public-cible-([a-z0-9-]+)/g)].map(m => m[1].replace(/-/g, ' '));
+  const typeTerms = [...bodyClasses.matchAll(/type-devenement-([a-z0-9-]+)/g)].map(m => m[1].replace(/-/g, ' '));
+  const ageText = publicTerms.some(t => /famille|enfants|tout public/i.test(t)) ? clean(publicTerms.join(', ')) : '';
+  const priceText = clean((`${description} ${$details.text()}`.match(/entrée libre|gratuit(?:e|s)?|prix libre|[0-9]+\s*(?:CHF|fr\.?)/i) || [''])[0]);
+  const officialSources = [listing.url || SOURCES.echallensTourisme.url];
+  $details.find('.cta-evenements a[href]').each((_, a) => {
+    const href = canonicalUrl($(a).attr('href'), listing.url || SOURCES.echallensTourisme.url);
+    if (href) officialSources.push(href);
+  });
+  return normalizeEvent({
+    source: 'echallensTourisme', title, startDate: range.startDate || listing.startDate, endDate: range.endDate || listing.endDate || null,
+    locationName: locationText || listing.placeText || 'Gros-de-Vaud', locationText: [locationText, listing.placeText].filter(Boolean).join(' | '), city,
+    url: listing.url || SOURCES.echallensTourisme.url, description, ageText, priceText,
+    tags: inferTags(`${title} ${description} ${typeTerms.join(' ')} ${listing.placeText || ''}`),
+    sourceProvenance: `Echallens Région Tourisme agenda (${dateText || listing.dateText || listing.startDate})`,
+    officialSources: uniqBy(officialSources, x => x),
+    evidence: clean([dateText, listing.placeText, publicTerms.join(', '), typeTerms.join(', '), description, officialSources.slice(1).join(' ')].filter(Boolean).join(' | '))
+  });
+}
+
+async function scrapeEchallensTourisme(maxPages = 9) {
+  const listingMap = new Map();
+  for (let page = 1; page <= maxPages; page++) {
+    const pageUrl = echallensTourismePageUrl(page);
+    const html = await fetchHtml(pageUrl, 30000);
+    const listings = extractEchallensTourismeListings(html, pageUrl);
+    for (const listing of listings) listingMap.set(listing.url + '|' + listing.startDate, listing);
+    const $ = cheerio.load(html);
+    const hasNext = $(`a[data-page="${page + 1}"]`).length > 0 || $('.wpgb-page-next a[href]').length > 0;
+    if (!hasNext && page > 1) break;
+  }
+  const events = [];
+  for (const listing of listingMap.values()) {
+    try {
+      const html = await fetchHtml(listing.url, 25000);
+      events.push(parseEchallensTourismeDetail(html, listing));
+    } catch (err) {
+      console.warn(`[echallensTourisme] detail fetch failed for ${listing.url}: ${err.message}`);
+      events.push(normalizeEvent({
+        source: 'echallensTourisme', title: listing.title, startDate: listing.startDate, endDate: listing.endDate || null,
+        locationName: listing.placeText || 'Gros-de-Vaud', locationText: listing.placeText || 'Gros-de-Vaud', city: listing.placeText || 'Echallens', url: listing.url,
+        description: 'Événement régional relayé par Echallens Région Tourisme. Détails à confirmer sur la fiche officielle.',
+        tags: inferTags(`${listing.title} ${listing.placeText} manifestation festival concert exposition terroir`),
+        sourceProvenance: `Echallens Région Tourisme listing (${listing.dateText})`, officialSources: [listing.url], evidence: `${listing.dateText} | ${listing.placeText}`
+      }));
+    }
+  }
+  return uniqBy(events.filter(e => e.title && e.startDate && e.url), e => e.id);
+}
+
 function extractLePommierListings(html, pageUrl = SOURCES.lePommier.url) {
   const $ = cheerio.load(html);
   const listings = [];
@@ -2074,7 +2194,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -2202,6 +2322,16 @@ function runFixtureTests() {
   assert.strictEqual(leProgrammeEvents[1].startDate, '2026-06-22T10:30:00+02:00');
   assert.strictEqual(leProgrammeEvents[0].city, 'Lausanne');
   assert(leProgrammeEvents[0].priceText.includes('10 CHF'), 'leprogramme.ch fixture should keep tariff evidence');
+  const etListings = extractEchallensTourismeListings('<article class="wpgb-card wpgb-card-3 wpgb-post-2510"><div class="wpgb-block-3 date_event">27 mai au 26 juin 2026</div><div class="wpgb-block-2 lieu_event"><span>Echallens</span></div><h3><a href="https://echallens-tourisme.ch/evenement/la-halte-estivale/">La Halte Estivale</a></h3></article>', SOURCES.echallensTourisme.url);
+  assert.strictEqual(etListings.length, 1);
+  assert.strictEqual(etListings[0].startDate, '2026-05-27');
+  assert.strictEqual(etListings[0].endDate, '2026-06-26');
+  const etEvent = parseEchallensTourismeDetail('<body class="public-cible-tout-public public-cible-famille type-devenement-fete-et-festival"><div class="event-details details"><h2>La Halte Estivale</h2><h4>27 mai au 26 juin 2026</h4><div class="description"><p>Concerts, animations et stands gourmands.</p></div><div class="contact-infos"><p>Place de la Gare, 1040 Echallens</p></div><div class="cta-evenements"><a href="https://www.echallens.ch/vivre-a-echallens/manifestations/halte-estivale.html">Site web</a></div></div></body>', etListings[0]);
+  assert.strictEqual(etEvent.source, 'echallensTourisme');
+  assert.strictEqual(etEvent.city, 'Echallens');
+  assert(/famille/.test(etEvent.ageText), 'Echallens Tourisme fixture should preserve family/public evidence');
+  assert(etEvent.officialSources.some(u => /echallens\.ch/.test(u)), 'Echallens Tourisme fixture should preserve official website link');
+
   const lePommierListings = extractLePommierListings('<div class="eventv2-grid"><a href="https://lepommier.ch/event/981-puisque-cest-comme-ca-je-vais-faire-un-opera-toute-seule" class="grid-item" data-date="1800144000"><div class="content" title="Puisque c’est comme ça je vais faire un opéra toute seule"><div class="date">Le 17 Jan.</div><div class="type">Théâtre</div></div></a></div>', SOURCES.lePommier.url);
   assert.strictEqual(lePommierListings.length, 1);
   const lePommierEvents = parseLePommierDetail('<main><h1>Puisque c’est comme ça je vais faire un opéra toute seule</h1><p>Informations Auteur / Autrice Claire Diterzi Genre Théâtre Type d\'événement Jeune public Age conseillé Dès 5 ans Durée 45 minutes Made in France Lieu Le Pommier Rue du Pommier 9 2000 Neuchâtel Billetterie Opéra Mode d’emploi (pour toute la famille) Les horaires et tarifs Dimanche 17 janvier 2027 à 10 h 30 Dimanche 17 janvier 2027 à 16 h 00 Jeune public Tarif unique : 15 CHF Abonnement de saison, découverte et jeune public : gratuit Distribution</p></main>', lePommierListings[0]);
@@ -2291,4 +2421,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
