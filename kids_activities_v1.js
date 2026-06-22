@@ -126,6 +126,11 @@ const SOURCES = {
     baseUrl: 'https://vd.leprogramme.ch',
     kind: 'vaud-child-family-theatre-aggregator'
   },
+  neuchatelVille: {
+    url: 'https://www.neuchatelville.ch/sortir-et-decouvrir/agenda',
+    baseUrl: 'https://www.neuchatelville.ch',
+    kind: 'official-city-culturoscope-agenda'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -1453,6 +1458,119 @@ async function scrapeEchallensTourisme(maxPages = 9) {
   return uniqBy(events.filter(e => e.title && e.startDate && e.url), e => e.id);
 }
 
+
+function extractNeuchatelVilleListings(html, pageUrl = SOURCES.neuchatelVille.url) {
+  const $ = cheerio.load(html);
+  const listings = [];
+  $('.event').each((_, el) => {
+    const node = $(el);
+    const a = node.find('.title a[href], a.event-detail-link[href], .image a[href]').first();
+    const url = canonicalUrl(a.attr('href'), SOURCES.neuchatelVille.baseUrl);
+    const title = stripLead(node.find('.title a').first().text() || a.attr('title') || node.find('img[alt]').attr('alt') || '');
+    const description = stripLead(node.find('.description').text());
+    const periodUid = node.find('.period-uid').val() || (url.match(/\/(\d+)$/) || [])[1] || '';
+    const eventUid = node.find('.event-uid').val() || (url.match(/-(\d+)\//) || [])[1] || '';
+    const periodTimestamp = node.find('.period-timestamp').val() || '';
+    const eventTimestamp = node.find('.event-timestamp').val() || '';
+    const dateText = stripLead(node.find('.header .date, .date').first().text());
+    if (url && title && /\/agenda\/detail\//.test(url)) listings.push({ url, title, description, periodUid, eventUid, periodTimestamp, eventTimestamp, dateText });
+  });
+  return uniqBy(listings, x => `${x.url}|${x.periodUid || x.periodTimestamp || x.dateText}`);
+}
+
+function parseNeuchatelDateText(text = '') {
+  const t = clean(text);
+  const numeric = t.match(/(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})(?:\s*(?:à|a|,)?\s*(\d{1,2})[:h](\d{2})?)?/i);
+  if (numeric) {
+    const date = `${numeric[3]}-${numeric[2].padStart(2, '0')}-${numeric[1].padStart(2, '0')}`;
+    const time = numeric[4] ? `${numeric[4].padStart(2, '0')}:${(numeric[5] || '00').padStart(2, '0')}:00${zurichOffsetForDate(date)}` : '';
+    return { startDate: time ? `${date}T${time}` : date, endDate: null };
+  }
+  const range = t.match(new RegExp(`du\\s+(\\d{1,2})\\s*(${MONTH_RE})?\\.?\\s+au\\s+(\\d{1,2})\\s*(${MONTH_RE})(?:\\s+(\\d{4}))?`, 'i'));
+  if (range) {
+    const year = range[5] || String(new Date().getFullYear());
+    const startMonth = MONTHS[(range[2] || range[4]).toLowerCase()];
+    const endMonth = MONTHS[range[4].toLowerCase()];
+    return { startDate: `${year}-${startMonth}-${range[1].padStart(2, '0')}`, endDate: `${year}-${endMonth}-${range[3].padStart(2, '0')}` };
+  }
+  const date = parseFrenchDate(t, new Date().getFullYear());
+  if (!date) return { startDate: null, endDate: null };
+  const time = (t.match(/(?:à|a|,)?\s*(\d{1,2})[:h](\d{2})?/i) || []).slice(1);
+  return { startDate: time[0] ? `${date}T${time[0].padStart(2, '0')}:${(time[1] || '00').padStart(2, '0')}:00${zurichOffsetForDate(date)}` : date, endDate: null };
+}
+
+function parseNeuchatelVilleDetail(html, listing = {}) {
+  const $ = cheerio.load(html);
+  const title = stripLead($('.event-detail h1').first().text() || listing.title);
+  const description = stripLead($('.event-detail .description').first().text() || listing.description);
+  const headerDate = stripLead($('.event-detail header .dates').first().text());
+  const infos = $('.complementary-information .info').map((_, el) => stripLead($(el).text())).get().filter(Boolean);
+  const dateInfo = infos.find(x => /\b(le|du):?\s*\d{1,2}[.\/]/i.test(x)) || headerDate || listing.dateText || '';
+  const parsed = parseNeuchatelDateText(dateInfo);
+  const headerVenue = (headerDate.split('|')[1] || '').trim();
+  const address = infos.find(x => /\d{4}\s+Neuch/i.test(x) && !/t[ée]l[ée]phone|e-mail|@/i.test(x)) || '';
+  const locationName = headerVenue || infos.find((x, idx) => idx > 1 && !/\d{4}\s+Neuch|t[ée]l[ée]phone|e-mail|@|^https?:|www\./i.test(x)) || 'Neuchâtel';
+  const priceText = [description, ...infos].find(x => /gratuit|entrée libre|tarif|prix|collecte|chapeau|CHF/i.test(x)) || '';
+  const officialLinks = $('.event-detail a[href]').map((_, a) => canonicalUrl($(a).attr('href'), SOURCES.neuchatelVille.baseUrl)).get()
+    .filter(u => u && !/neuchatelville\.ch\/sortir-et-decouvrir\/agenda$/.test(u));
+  const evidence = clean([dateInfo, locationName, address, priceText, listing.description].filter(Boolean).join(' | '));
+  return { title, description, startDate: parsed.startDate, endDate: parsed.endDate, locationName, locationText: clean([locationName, address].filter(Boolean).join(', ')), city: 'Neuchâtel', priceText, officialSources: uniqBy([listing.url, ...officialLinks], x => x), evidence };
+}
+
+async function fetchNeuchatelVilleNextPage(loadMoreUrl, visiblePeriods, fromTimestamp, limit = 9) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const body = new URLSearchParams({
+      'tx_culturoscope_list[fromTimestamp]': fromTimestamp,
+      'tx_culturoscope_list[limit]': String(limit),
+      'tx_culturoscope_list[visiblePeriods]': visiblePeriods
+    });
+    const res = await fetch(loadMoreUrl, { method: 'POST', signal: controller.signal, headers: { 'user-agent': 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', referer: SOURCES.neuchatelVille.url, 'x-requested-with': 'XMLHttpRequest', 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8' }, body });
+    if (!res.ok) throw new Error(`${loadMoreUrl} -> HTTP ${res.status}`);
+    return await res.text();
+  } finally { clearTimeout(timer); }
+}
+
+async function scrapeNeuchatelVille(maxPages = 8) {
+  const firstHtml = await fetchHtml(SOURCES.neuchatelVille.url, 30000);
+  const $first = cheerio.load(firstHtml);
+  let loadMoreUrl = canonicalUrl($first('#load-more-url').val(), SOURCES.neuchatelVille.baseUrl);
+  let listings = extractNeuchatelVilleListings(firstHtml, SOURCES.neuchatelVille.url);
+  let html = firstHtml;
+  for (let page = 2; page <= maxPages && loadMoreUrl; page++) {
+    const $ = cheerio.load(html);
+    const visiblePeriods = listings.map(x => x.periodUid).filter(Boolean).join(',');
+    const fromTimestamp = (listings[listings.length - 1] || {}).periodTimestamp || $('.event:last-child .period-timestamp').val();
+    if (!fromTimestamp || !visiblePeriods) break;
+    html = await fetchNeuchatelVilleNextPage(loadMoreUrl, visiblePeriods, fromTimestamp, 9);
+    const more = extractNeuchatelVilleListings(html, SOURCES.neuchatelVille.url);
+    if (!more.length) break;
+    listings = uniqBy([...listings, ...more], x => `${x.url}|${x.periodUid || x.periodTimestamp || x.dateText}`);
+    if (!/show-load-more-button/.test(html)) break;
+  }
+  const events = [];
+  for (let i = 0; i < listings.length; i += 6) {
+    const batch = listings.slice(i, i + 6);
+    const parsed = await Promise.all(batch.map(async listing => {
+      try { return { listing, detail: parseNeuchatelVilleDetail(await fetchHtml(listing.url, 18000), listing) }; }
+      catch { return { listing, detail: parseNeuchatelVilleDetail('', listing) }; }
+    }));
+    for (const { listing, detail } of parsed) {
+      const startDate = detail.startDate || parseNeuchatelDateText(listing.dateText).startDate;
+      if (!startDate) continue;
+      events.push(normalizeEvent({
+        source: 'neuchatelVille', url: listing.url, title: detail.title || listing.title, startDate, endDate: detail.endDate,
+        locationName: detail.locationName || 'Neuchâtel', locationText: detail.locationText || 'Neuchâtel', city: 'Neuchâtel',
+        description: detail.description || listing.description, priceText: detail.priceText, officialSources: detail.officialSources || [listing.url],
+        sourceProvenance: `Ville de Neuchâtel agenda / Culturoscope: ${SOURCES.neuchatelVille.url}`,
+        evidence: detail.evidence || listing.description
+      }));
+    }
+  }
+  return uniqBy(events, e => e.id);
+}
+
 function extractLePommierListings(html, pageUrl = SOURCES.lePommier.url) {
   const $ = cheerio.load(html);
   const listings = [];
@@ -2194,7 +2312,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -2332,6 +2450,9 @@ function runFixtureTests() {
   assert(/famille/.test(etEvent.ageText), 'Echallens Tourisme fixture should preserve family/public evidence');
   assert(etEvent.officialSources.some(u => /echallens\.ch/.test(u)), 'Echallens Tourisme fixture should preserve official website link');
 
+  const neuchatelListings = extractNeuchatelVilleListings('<div class="tx-culturoscope"><div class="event event-detailed"><div class="title"><a href="/sortir-et-decouvrir/agenda/detail/la-fonzie-family-52076/38760">La Fonzie Family</a></div><div class="description">Concert gratuit au bord du lac</div><input class="period-timestamp" value="1782403200"><input class="period-uid" value="38760"><input class="event-uid" value="9000"></div></div>', SOURCES.neuchatelVille.url);
+  assert.strictEqual(neuchatelListings.length, 1);
+  assert.strictEqual(parseNeuchatelVilleDetail('<div class="event-detail"><h1>La Fonzie Family</h1><header><div class="dates">25 juin 2026 18:00 | Kiosk Art</div><div class="description">Concert gratuit.</div></header><div class="complementary-information"><div class="info"><span>le:&nbsp;</span><span>25.06.2026 à 18:00</span></div><div class="info">Kiosk Art</div><div class="info">Quai Ph.Godet 5 2000 Neuchâtel</div></div></div>', neuchatelListings[0]).startDate, '2026-06-25T18:00:00+02:00');
   const lePommierListings = extractLePommierListings('<div class="eventv2-grid"><a href="https://lepommier.ch/event/981-puisque-cest-comme-ca-je-vais-faire-un-opera-toute-seule" class="grid-item" data-date="1800144000"><div class="content" title="Puisque c’est comme ça je vais faire un opéra toute seule"><div class="date">Le 17 Jan.</div><div class="type">Théâtre</div></div></a></div>', SOURCES.lePommier.url);
   assert.strictEqual(lePommierListings.length, 1);
   const lePommierEvents = parseLePommierDetail('<main><h1>Puisque c’est comme ça je vais faire un opéra toute seule</h1><p>Informations Auteur / Autrice Claire Diterzi Genre Théâtre Type d\'événement Jeune public Age conseillé Dès 5 ans Durée 45 minutes Made in France Lieu Le Pommier Rue du Pommier 9 2000 Neuchâtel Billetterie Opéra Mode d’emploi (pour toute la famille) Les horaires et tarifs Dimanche 17 janvier 2027 à 10 h 30 Dimanche 17 janvier 2027 à 16 h 00 Jeune public Tarif unique : 15 CHF Abonnement de saison, découverte et jeune public : gratuit Distribution</p></main>', lePommierListings[0]);
@@ -2421,4 +2542,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
