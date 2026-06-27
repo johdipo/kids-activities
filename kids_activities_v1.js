@@ -63,6 +63,20 @@ const SOURCES = {
     domain: 'agenda_culture',
     kind: 'official-yverdon-cultural-geocity-agenda'
   },
+  yverdonVille: {
+    url: 'https://www.yverdon-les-bains.ch/medias/agenda',
+    apiUrl: 'https://geocity.ch/rest/agenda',
+    // Official Ville d'Yverdon-les-Bains Geocity agendas. `agenda_culture` is
+    // intentionally excluded: it is the same domain already harvested by `emoi`.
+    // `agenda_jardins` is exposed by the site but currently empty; it is kept so
+    // future content is picked up automatically without code changes.
+    themes: [
+      { domain: 'agenda_sports', label: 'Sport & activité physique', page: 'https://www.yverdon-les-bains.ch/sports-et-activite-physique/agenda' },
+      { domain: 'agenda_jecos', label: 'Jeunesse & cohésion sociale', page: 'https://www.yverdon-les-bains.ch/votre-commune/les-services-de-ladministration/jeunesse/agenda' },
+      { domain: 'agenda_jardins', label: 'Jardins & nature en ville', page: 'https://www.yverdon-les-bains.ch/medias/agenda' }
+    ],
+    kind: 'official-city-geocity-agenda'
+  },
   infomaniakYverdon: {
     url: 'https://infomaniak.events/fr-ch/yverdon-les-bains',
     kind: 'ticketing-agenda'
@@ -609,11 +623,12 @@ async function fetchEmoiJson(url, timeoutMs = 25000) {
   }
 }
 
-function parseEmoiEvent(feature) {
-  const raw = feature?.properties || feature || {};
+// Shared normalizer for any Geocity (`geocity.ch/rest/agenda`) detail record.
+// EMOI, Orbe and the Ville d'Yverdon agendas all share this exact schema.
+function buildGeocityEvent(raw, opts) {
   const publics = parseGeocityArray(raw.publics);
   const genre = parseGeocityArray(raw.genre_evenement);
-  const location = clean(raw.location_details || 'Yverdon-les-Bains et région');
+  const location = clean(raw.location_details || opts.fallbackLocation);
   const detailText = clean([
     raw.summary,
     raw.schedule,
@@ -631,20 +646,20 @@ function parseEmoiEvent(feature) {
   if (/tous publics|familles?|jeune public/i.test(publics) && !tags.includes('discovery')) tags.push('discovery');
   const officialSources = [raw.website, raw.organizer_website].filter(Boolean);
   return normalizeEvent({
-    source: 'emoi',
+    source: opts.source,
     title: raw.title,
     startDate: raw.starts_at || null,
     endDate: raw.ends_at || null,
     locationName: location.split(',')[0],
     locationText: location,
-    city: cityFromLocation(location, 'Yverdon-les-Bains'),
-    url: emoiEventUrl(raw.id),
+    city: cityFromLocation(location, opts.defaultCity),
+    url: opts.url,
     description: clean([raw.summary, raw.schedule].filter(Boolean).join(' — ')),
     priceText: raw.pricing || '',
     ageText,
     tags,
     officialSources,
-    sourceProvenance: 'EMOI agenda culturel officiel via Geocity agenda_culture API',
+    sourceProvenance: opts.sourceProvenance,
     evidence: clean([
       raw.title,
       raw.starts_at && `début ${raw.starts_at}`,
@@ -655,8 +670,20 @@ function parseEmoiEvent(feature) {
       genre && `genre ${genre}`,
       raw.organizer_name && `organisateur ${raw.organizer_name}`,
       raw.website && `site ${raw.website}`,
+      opts.extraEvidence,
       raw.summary
     ].filter(Boolean).join(' | '))
+  });
+}
+
+function parseEmoiEvent(feature) {
+  const raw = feature?.properties || feature || {};
+  return buildGeocityEvent(raw, {
+    source: 'emoi',
+    url: emoiEventUrl(raw.id),
+    fallbackLocation: 'Yverdon-les-Bains et région',
+    defaultCity: 'Yverdon-les-Bains',
+    sourceProvenance: 'EMOI agenda culturel officiel via Geocity agenda_culture API'
   });
 }
 
@@ -678,6 +705,52 @@ async function scrapeEmoi() {
       events.push(parseEmoiEvent(detail));
     } catch (e) {
       events.push({ source: 'emoi', title: `EMOI event ${id}`, url: emoiEventUrl(id), error: e.message });
+    }
+  }
+  return events.filter(e => !e.error);
+}
+
+function yverdonVilleEventUrl(id, themePage) {
+  // Geocity widgets address a single event via a hash fragment on the host page.
+  return `${themePage}#/event/${id}`;
+}
+
+async function scrapeYverdonVille() {
+  const source = 'yverdonVille';
+  const events = [];
+  for (const theme of SOURCES.yverdonVille.themes) {
+    // Collect the listing ids for this themed agenda (paginated).
+    const ids = [];
+    let nextUrl = `${SOURCES.yverdonVille.apiUrl}?domain=${theme.domain}&page=1&page_size=50`;
+    for (let page = 0; nextUrl && page < 10; page++) {
+      let payload;
+      try {
+        payload = await fetchEmoiJson(nextUrl, 30000);
+      } catch (e) {
+        events.push({ source, title: `Yverdon ${theme.domain} listing`, url: theme.page, error: e.message });
+        break;
+      }
+      for (const feature of payload.features || []) {
+        const id = feature?.properties?.id;
+        if (id) ids.push(id);
+      }
+      nextUrl = payload.next || '';
+    }
+    for (const id of [...new Set(ids)]) {
+      try {
+        const detail = await fetchEmoiJson(`${SOURCES.yverdonVille.apiUrl}/${id}`, 25000);
+        const raw = detail?.properties || detail || {};
+        events.push(buildGeocityEvent(raw, {
+          source,
+          url: yverdonVilleEventUrl(id, theme.page),
+          fallbackLocation: 'Yverdon-les-Bains',
+          defaultCity: 'Yverdon-les-Bains',
+          sourceProvenance: `Ville d'Yverdon-les-Bains agenda officiel (${theme.label}) via Geocity ${theme.domain} API`,
+          extraEvidence: `agenda ${theme.label}`
+        }));
+      } catch (e) {
+        events.push({ source, title: `Yverdon-les-Bains event ${id}`, url: yverdonVilleEventUrl(id, theme.page), error: e.message });
+      }
     }
   }
   return events.filter(e => !e.error);
@@ -2426,7 +2499,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await fn();
@@ -2661,4 +2734,4 @@ async function main() {
 
 if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, parseEmoiEvent, scrapeEmoi, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
