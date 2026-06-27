@@ -2492,6 +2492,20 @@ function canonicalRecommendationPool(events) {
   return uniqBy([...events].sort((a, b) => sourceTrustPriority(a) - sourceTrustPriority(b)), recommendationKey);
 }
 
+// Per-source wall-clock guard. Individual fetches already abort at 15-30s, but a
+// stalled DNS/body-read or a paginating source can still block the sequential
+// collectAll loop indefinitely (root cause of the 2026-06-25 silent collection
+// hang: no artifact produced). withTimeout rejects loudly so one bad source is
+// logged as an error and the run continues with the remaining sources.
+const SOURCE_TIMEOUT_MS = 90000;
+function withTimeout(promise, ms, label) {
+  let timer;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`source timed out after ${Math.round(ms / 1000)}s (wall-clock guard)`)), ms);
+  });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
+}
+
 async function collectAll() {
   const sourceLogs = [];
   const out = [];
@@ -2502,7 +2516,7 @@ async function collectAll() {
   for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
-      const result = await fn();
+      const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
       const items = Array.isArray(result) ? result : (result.events || []);
       out.push(...items);
       sourceLogs.push({
@@ -2732,6 +2746,19 @@ async function main() {
   if (!accepted.length) process.exitCode = 3;
 }
 
-if (require.main === module) main().catch(err => { console.error(err); process.exit(1); });
+if (require.main === module) {
+  // Overall wall-clock watchdog: even with per-source timeouts, guarantee the
+  // process never hangs forever. A loud non-zero exit (124) lets the cron's
+  // failureAlert fire instead of a silent stall. Skipped for the fast fixture run.
+  if (!process.argv.includes('--fixture-test')) {
+    const MAX_RUNTIME_MS = 600000; // 10 min — far above normal runtime (seconds)
+    const watchdog = setTimeout(() => {
+      console.error(`Watchdog: run exceeded ${MAX_RUNTIME_MS / 1000}s, aborting (no artifact produced).`);
+      process.exit(124);
+    }, MAX_RUNTIME_MS);
+    watchdog.unref();
+  }
+  main().catch(err => { console.error(err); process.exit(1); });
+}
 
 module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
