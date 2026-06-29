@@ -41,6 +41,16 @@ const LOCATION_KM_FROM_YVERDON = {
   'goumoens-la-ville': 18,
   lausanne: 39,
   morat: 38,
+  murten: 38,
+  avenches: 30,
+  salavaux: 33,
+  cudrefin: 42,
+  payerne: 25,
+  'estavayer-le-lac': 22,
+  estavayer: 22,
+  'praz (vully)': 35,
+  praz: 35,
+  vully: 35,
   morges: 48,
   neuchatel: 39,
   neuchâtel: 39,
@@ -155,6 +165,16 @@ const SOURCES = {
     url: 'https://www.neuchatelville.ch/sortir-et-decouvrir/agenda',
     baseUrl: 'https://www.neuchatelville.ch',
     kind: 'official-city-culturoscope-agenda'
+  },
+  avenches: {
+    url: 'https://www.avenches.ch/fr/Z14820/agenda-des-manifestations',
+    // The MyCity Tourism React app exposes the full agenda as JSON via the
+    // `?_format=json` variant of the page id (the page bundle sets
+    // window.jsonPath to this URL). One request returns the whole upcoming
+    // list (`end: "end"`), so no pagination is needed.
+    apiUrl: 'https://www.avenches.ch/fr/Z14820?_format=json',
+    baseUrl: 'https://www.avenches.ch',
+    kind: 'mycity-tourism-broye-events-agenda'
   },
   manualJohan: {
     url: 'manual://johan/kids-activities',
@@ -2467,6 +2487,78 @@ function eventReviewQueue(scored, window) {
   };
 }
 
+// --- Avenches / Broye (MyCity Tourism) ---------------------------------------
+// MyCity exposes agenda dates as `YYYY/MM/DD` with no time component. The detail
+// pages only repeat date ranges ("Ouvert, horaires variables") so there is no
+// reliable time/price to enrich from; we keep date-level occurrences plus the
+// rich listing metadata (categories, types, location, geo, description).
+function avenchesDateToIso(value) {
+  const m = clean(value || '').match(/(\d{4})\/(\d{1,2})\/(\d{1,2})/);
+  if (!m) return null;
+  return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+}
+
+function parseAvenchesEvent(raw, opts = {}) {
+  const base = opts.baseUrl || SOURCES.avenches.baseUrl;
+  const startDate = avenchesDateToIso(raw?.dates?.start);
+  const endIso = avenchesDateToIso(raw?.dates?.end);
+  const endDate = endIso && endIso !== startDate ? endIso : null;
+  const categories = (raw.categories || []).map(c => clean(c && c.label)).filter(Boolean);
+  const types = (raw.types || []).map(t => clean(t && t.label)).filter(Boolean);
+  const catText = [...new Set([...categories, ...types])].join(', ');
+  const location = clean(raw.location || '');
+  const url = canonicalUrl(raw.url, base);
+  const title = clean(raw.title);
+  const description = clean(raw.description);
+  const ageText = /famille|enfant|jeune public|tout public/i.test(`${title} ${description} ${catText}`)
+    ? 'famille / tout public mentionné'
+    : '';
+  const priceText = /gratuit|entr[ée]e libre|offert/i.test(`${title} ${description}`) ? 'Gratuit (à confirmer)' : '';
+  const tags = inferTags(`${title} ${description} ${catText}`);
+  return normalizeEvent({
+    source: 'avenches',
+    title,
+    startDate,
+    endDate,
+    locationName: location,
+    locationText: location,
+    city: location || cityFromLocation(location, 'Avenches'),
+    url,
+    description,
+    ageText,
+    priceText,
+    tags,
+    officialSources: [url].filter(Boolean),
+    sourceProvenance: 'Office du tourisme d’Avenches (MyCity) — agenda des manifestations Broye/Lac de Morat via _format=json',
+    evidence: clean([
+      title,
+      startDate && `début ${startDate}`,
+      endDate && `fin ${endDate}`,
+      location && `lieu ${location}`,
+      catText && `catégories ${catText}`,
+      description
+    ].filter(Boolean).join(' | '))
+  });
+}
+
+async function scrapeAvenches() {
+  let payload;
+  try {
+    payload = await fetchEmoiJson(SOURCES.avenches.apiUrl, 30000);
+  } catch (e) {
+    return [{ source: 'avenches', title: 'Avenches agenda', url: SOURCES.avenches.url, error: e.message }];
+  }
+  const data = Array.isArray(payload && payload.data) ? payload.data : [];
+  const events = [];
+  for (const raw of data) {
+    if (!raw || !raw.title) continue;
+    const ev = parseAvenchesEvent(raw, { baseUrl: SOURCES.avenches.baseUrl });
+    if (!ev.startDate) continue;
+    events.push(ev);
+  }
+  return uniqBy(events, e => e.url || e.id);
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -2513,7 +2605,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
@@ -2667,6 +2759,18 @@ function runFixtureTests() {
   assert.strictEqual(lePommierEvents[0].startDate, '2027-01-17T10:30:00+02:00');
   assert.strictEqual(lePommierEvents[0].ageMin, 5);
   assert(lePommierEvents[0].priceText.includes('15 CHF'), 'Le Pommier fixture should keep tariff evidence');
+  assert.strictEqual(avenchesDateToIso('2026/07/02'), '2026-07-02');
+  const avenchesEvent = parseAvenchesEvent({ id: 4537530, title: "Marché d'été au Camping Plage Avenches", description: "Le Camping-Plage d'Avenches accueille tout l'été les étals des maraîchers et artisans de la région", url: '/fr/P119111/marche-d-ete-au-camping-plage-avenches', location: 'Avenches', categories: [{ label: 'Marché', value: 'c-159' }], types: [{ label: 'Manifestations', value: 'pc-18' }], dates: { start: '2026/07/02', end: '2026/08/15' } });
+  assert.strictEqual(avenchesEvent.source, 'avenches');
+  assert.strictEqual(avenchesEvent.startDate, '2026-07-02');
+  assert.strictEqual(avenchesEvent.endDate, '2026-08-15');
+  assert.strictEqual(avenchesEvent.city, 'Avenches');
+  assert.strictEqual(avenchesEvent.url, 'https://www.avenches.ch/fr/P119111/marche-d-ete-au-camping-plage-avenches');
+  assert(avenchesEvent.tags.includes('food'), 'Avenches marché fixture should infer a food/terroir tag');
+  assert(avenchesEvent.officialSources.some(u => /avenches\.ch\/fr\/P119111/.test(u)), 'Avenches fixture should keep the official detail URL');
+  const avenchesSingleDay = parseAvenchesEvent({ title: 'SUP Suisse Flatwater Championship 2026', description: 'Compétition', url: '/fr/P187973/sup', location: 'Morat', categories: [{ label: 'Sport', value: 'c-342' }], types: [], dates: { start: '2026/06/27', end: '2026/06/27' } });
+  assert.strictEqual(avenchesSingleDay.endDate, null, 'Avenches single-day event should not duplicate start as endDate');
+  assert.strictEqual(avenchesSingleDay.city, 'Morat');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -2761,4 +2865,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches };
