@@ -176,6 +176,20 @@ const SOURCES = {
     baseUrl: 'https://www.avenches.ch',
     kind: 'mycity-tourism-broye-events-agenda'
   },
+  fribourgTerroir: {
+    url: 'https://fribourg.ch/fr/terroir-fribourg/agenda/',
+    // FribourgRégion (ex fribourgregion.ch -> fribourg.ch) is an Understrap
+    // WordPress site. The `event` post type is exposed on the public WP REST
+    // API. The canton-wide list is 845 events, so we scope by the `region`
+    // taxonomy to the two Broye / lakeside areas that fit Johan's terroir /
+    // Lac de Morat / Estavayer-Payerne taste (regions 182 + 194); event dates,
+    // times, prices and venue live only on the detail pages (`#horaires`,
+    // `#tarifs`, `#description`), so each scoped event is enriched from its page.
+    apiUrl: 'https://fribourg.ch/fr/wp-json/wp/v2/event',
+    regions: { 182: 'Estavayer-le-Lac / Payerne (Broye)', 194: 'Région Lac de Morat (Morat / Vully)' },
+    baseUrl: 'https://fribourg.ch',
+    kind: 'fribourgregion-wp-rest-broye-lac-events'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -2559,6 +2573,158 @@ async function scrapeAvenches() {
   return uniqBy(events, e => e.url || e.id);
 }
 
+// --- FribourgRégion / Terroir Fribourg — Broye & Lac de Morat (WP REST) -------
+// fribourg.ch (ex fribourgregion.ch) exposes an `event` post type on its public
+// WP REST API. The canton-wide list is 845 events, so we scope by the `region`
+// taxonomy to the two Broye / lakeside areas matching Johan's terroir / Lac de
+// Morat / Estavayer-Payerne taste (182 + 194). Dates/times, price and venue
+// only live on the detail pages (`#horaires`, `#tarifs`, `#description`,
+// `#liens`), so each scoped event is enriched from its page.
+function decodeHtmlEntities(s = '') {
+  return clean(cheerio.load(`<x>${s || ''}</x>`)('x').text());
+}
+
+function parseFribourgHoraire(h5Text) {
+  const t = clean(h5Text);
+  const range = t.match(new RegExp(`du\\s+(\\d{1,2})(?:\\s+(${MONTH_RE})\\.?)?\\s+au\\s+(\\d{1,2})\\s+(${MONTH_RE})\\.?\\s+(\\d{4})`, 'i'));
+  if (range) {
+    const year = range[5];
+    const startMonth = MONTHS[(range[2] || range[4]).toLowerCase()];
+    const endMonth = MONTHS[range[4].toLowerCase()];
+    return {
+      startDate: `${year}-${startMonth}-${range[1].padStart(2, '0')}`,
+      endDate: `${year}-${endMonth}-${range[3].padStart(2, '0')}`
+    };
+  }
+  return { startDate: parseFrenchDate(t), endDate: null };
+}
+
+function fribourgCity(text, regionLabel = '') {
+  // Town = a single (possibly hyphenated) capitalised token after a CH postal
+  // code, e.g. "Estavayer-le-Lac", "Salavaux", "Sugiez".
+  const m = clean(text).match(/\b(?:1[45]\d{2}|3[23]\d{2})\s+([A-ZÀ-Ÿ][a-zà-ÿ'’]+(?:-[A-Za-zà-ÿ'’]+)*)/);
+  if (m) {
+    // Adjacent CMS blocks can glue text without a space (e.g. "KerzersPrix");
+    // split such CamelCase glue and cut at any trailing heading label.
+    const town = clean(m[1]).replace(/([a-zà-ÿ])([A-ZÀ-Ÿ])/g, '$1 $2')
+      .split(/\s+(?:Prix|Tarif|Description|Contact|Horaire|Lien|Website|Information)/)[0];
+    return town.replace(/[\s.,;:\-]+$/, '').trim() || regionLabel;
+  }
+  return regionLabel;
+}
+
+function parseFribourgDetail(html, listing, opts = {}) {
+  const $ = cheerio.load(html);
+  const base = opts.baseUrl || SOURCES.fribourgTerroir.baseUrl;
+  const regionLabel = opts.regionLabel || 'Broye / Lac de Morat';
+  const url = canonicalUrl(listing.link, base);
+  const title = decodeHtmlEntities(listing?.title?.rendered || listing?.title || '') || clean($('h1').first().text());
+  const description = clean($('#description').text());
+  const tarifText = clean($('#tarifs').text());
+  let priceText = clean(tarifText.replace(/^\s*Prix\s*/i, ''));
+  if (/gratuit|entr[ée]e libre|kostenlos|\bfree\b/i.test(`${tarifText} ${description} ${title}`)) {
+    priceText = priceText || 'Gratuit / entrée libre (à confirmer)';
+  }
+  const website = $('#liens a[href]').map((i, el) => $(el).attr('href')).get()
+    .find(h => h && /^https?:/i.test(h) && !/fribourg\.ch/i.test(h)) || '';
+  // Scope city lookup to clean blocks only — the full `main` text glues adjacent
+  // CMS blocks without spaces. #fp_contact carries the area tourism-office town
+  // (Morat / Estavayer), a good region-level approximation when no venue town shows.
+  const city = fribourgCity(`${description} ${$('#fp_contact').text()}`, regionLabel);
+  const officialSources = [url, website].filter(Boolean);
+
+  const occurrences = [];
+  $('#horaires .horaires h5').each((i, el) => {
+    const $h = $(el);
+    const { startDate, endDate } = parseFribourgHoraire($h.text());
+    if (!startDate) return;
+    occurrences.push({ startDate, endDate, timeText: clean($h.nextUntil('h5').text()) });
+  });
+
+  const tags = inferTags(`${title} ${description} ${regionLabel}`);
+  const ageText = /famille|enfant|jeune public|tout public|kinder|familien/i.test(`${title} ${description}`)
+    ? 'famille / tout public mentionné' : '';
+  const events = [];
+  for (const occ of occurrences.slice(0, 12)) {
+    events.push(normalizeEvent({
+      source: 'fribourgTerroir',
+      title,
+      startDate: isoDateZurich(occ.startDate, occ.timeText),
+      endDate: occ.endDate,
+      locationName: city || regionLabel,
+      locationText: clean([city, regionLabel].filter(Boolean).join(' — ')),
+      city: city || regionLabel,
+      url,
+      description,
+      ageText,
+      priceText,
+      tags,
+      officialSources,
+      sourceProvenance: `FribourgRégion / Terroir Fribourg (${regionLabel}) — WP REST event API, détail enrichi`,
+      evidence: clean([
+        title,
+        occ.startDate && `date ${occ.startDate}`,
+        occ.endDate && `→ ${occ.endDate}`,
+        occ.timeText && `horaire ${occ.timeText}`,
+        city && `lieu ${city}`,
+        priceText && `tarif ${priceText}`,
+        description
+      ].filter(Boolean).join(' | '))
+    }));
+  }
+  return events;
+}
+
+async function scrapeFribourgTerroir() {
+  const regions = SOURCES.fribourgTerroir.regions;
+  const regionIds = Object.keys(regions).join(',');
+  const listings = [];
+  try {
+    for (let page = 1; page <= 6; page++) {
+      const url = `${SOURCES.fribourgTerroir.apiUrl}?region=${regionIds}&per_page=100&page=${page}&_fields=id,link,title,region`;
+      let batch;
+      try {
+        batch = await fetchEmoiJson(url, 30000);
+      } catch (e) {
+        break; // WP returns HTTP 400 past the last page; treat as end of pagination.
+      }
+      if (!Array.isArray(batch) || !batch.length) break;
+      listings.push(...batch);
+      if (batch.length < 100) break;
+    }
+  } catch (e) {
+    return [{ source: 'fribourgTerroir', title: 'FribourgRégion agenda', url: SOURCES.fribourgTerroir.url, error: e.message }];
+  }
+  if (!listings.length) return [];
+
+  const today = new Date().toISOString().slice(0, 10);
+  const deadline = Date.now() + 75000; // stay under the 90s per-source guard; return partial if slow.
+  const events = [];
+  const batchSize = 8;
+  for (let i = 0; i < listings.length; i += batchSize) {
+    if (Date.now() > deadline) break;
+    const batch = listings.slice(i, i + batchSize);
+    const parsed = await Promise.all(batch.map(async (listing) => {
+      const regionId = (listing.region || []).find(r => regions[r]);
+      const regionLabel = regions[regionId] || 'Broye / Lac de Morat';
+      try {
+        const html = await fetchHtml(listing.link, 20000);
+        return parseFribourgDetail(html, listing, { regionLabel, baseUrl: SOURCES.fribourgTerroir.baseUrl });
+      } catch (e) {
+        return [];
+      }
+    }));
+    for (const evs of parsed) {
+      for (const ev of evs) {
+        // Keep upcoming + currently-running (range) occurrences; the canton list is not date-sorted.
+        const effectiveEnd = (ev.endDate || ev.startDate || '').slice(0, 10);
+        if (effectiveEnd && effectiveEnd >= today) events.push(ev);
+      }
+    }
+  }
+  return uniqBy(events, e => e.id);
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -2605,7 +2771,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
@@ -2771,6 +2937,26 @@ function runFixtureTests() {
   const avenchesSingleDay = parseAvenchesEvent({ title: 'SUP Suisse Flatwater Championship 2026', description: 'Compétition', url: '/fr/P187973/sup', location: 'Morat', categories: [{ label: 'Sport', value: 'c-342' }], types: [], dates: { start: '2026/06/27', end: '2026/06/27' } });
   assert.strictEqual(avenchesSingleDay.endDate, null, 'Avenches single-day event should not duplicate start as endDate');
   assert.strictEqual(avenchesSingleDay.city, 'Morat');
+  // FribourgRégion / Terroir Fribourg (Broye + Lac de Morat WP REST source).
+  assert.deepStrictEqual(parseFribourgHoraire('Du 10 au 26 juil. 2026'), { startDate: '2026-07-10', endDate: '2026-07-26' });
+  assert.deepStrictEqual(parseFribourgHoraire('Du 8 juin au 16 août 2026'), { startDate: '2026-06-08', endDate: '2026-08-16' });
+  assert.deepStrictEqual(parseFribourgHoraire('29 août 2026'), { startDate: '2026-08-29', endDate: null });
+  assert.strictEqual(fribourgCity('Rendez-vous au 1585 Salavaux pour la course.', 'Région Lac de Morat'), 'Salavaux');
+  assert.strictEqual(fribourgCity('Aucune adresse ici.', 'Région Lac de Morat (Morat / Vully)'), 'Région Lac de Morat (Morat / Vully)');
+  const fribourgHtml = '<h1>VullyRun</h1>'
+    + '<div id="description">La VullyRun, course emblématique du Vully entre villages et vignes, à 1585 Salavaux.</div>'
+    + '<div id="horaires"><figure class="horaires"><div><h5>29 août 2026</h5><div><p>Samedi</p><p>15:45 - 22:00</p></div></div></figure></div>'
+    + '<div id="tarifs">Prix Entrée 30.- CHF</div>'
+    + '<div id="liens"><a href="https://www.vullyrun.ch/">Website</a></div>';
+  const fribourgEvents = parseFribourgDetail(fribourgHtml, { link: 'https://fribourg.ch/fr/regionlacdemorat/evenements/vullyrun/', title: { rendered: 'VullyRun' }, region: [194] }, { regionLabel: 'Région Lac de Morat (Morat / Vully)' });
+  assert.strictEqual(fribourgEvents.length, 1);
+  assert.strictEqual(fribourgEvents[0].source, 'fribourgTerroir');
+  assert.strictEqual(fribourgEvents[0].startDate, '2026-08-29T15:45:00+02:00');
+  assert.strictEqual(fribourgEvents[0].city, 'Salavaux');
+  assert(fribourgEvents[0].priceText.includes('30'), 'Fribourg fixture should keep tariff evidence');
+  assert.strictEqual(fribourgEvents[0].url, 'https://fribourg.ch/fr/regionlacdemorat/evenements/vullyrun/');
+  assert(fribourgEvents[0].officialSources.some(u => /vullyrun\.ch/.test(u)), 'Fribourg fixture should keep the external official website');
+  assert(fribourgEvents[0].tags.includes('sport'), 'Fribourg fixture should infer a sport tag from "course"');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -2865,4 +3051,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir };
