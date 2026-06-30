@@ -190,6 +190,18 @@ const SOURCES = {
     baseUrl: 'https://fribourg.ch',
     kind: 'fribourgregion-wp-rest-broye-lac-events'
   },
+  payerne: {
+    url: 'https://www.payerne.ch/manifestations/',
+    baseUrl: 'https://www.payerne.ch',
+    // www.payerne.ch serves a valid DigiCert leaf but omits its intermediate
+    // from the TLS handshake, and the host blocks outbound port-80 AIA fetching,
+    // so Node fetch and plain curl both fail to build the chain. We keep TLS
+    // verification ON by passing a shipped chain bundle (the DigiCert Global G2
+    // TLS RSA SHA256 2020 CA1 intermediate + DigiCert Global Root G2) to
+    // curl --cacert instead of disabling verification with -k.
+    caBundle: 'assets/payerne-digicert-chain.pem',
+    kind: 'communal-manifestations-broye-agenda'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -2725,6 +2737,106 @@ async function scrapeFribourgTerroir() {
   return uniqBy(events, e => e.id);
 }
 
+// --- Payerne (Broye) communal manifestations --------------------------------
+// www.payerne.ch is a WordPress site whose /manifestations/ page renders the
+// whole season as a static Bootstrap accordion: one `.card` per event with a
+// header "<date prefix> - <title>" and a body holding the authoritative French
+// date sentence ("a lieu le …" / "du … au …" / "le X et Y …"), an
+// "Emplacement" line, an optional "Horaire(s)" line and an external info link.
+// There is no per-event detail page or REST `event` type, so events use a
+// stable #heading fragment of the manifestations page as their URL and the
+// external "Informations / Programme complet" link is kept as evidence. The
+// strongly Broye/terroir-flavoured programme (caves ouvertes, Red Pigs / Poulpe
+// / Malt'Broye / Foodtruck festivals, Marché du Jeu, Fête de la Terre, slowUp)
+// fits Johan's La Dérivée / free-festival taste.
+function fetchPayerneHtml(url, timeoutMs = 30000) {
+  const maxTime = Math.max(5, Math.ceil(timeoutMs / 1000));
+  const caBundle = path.join(__dirname, SOURCES.payerne.caBundle);
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--cacert', caBundle, '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
+}
+
+// Parse the authoritative French date sentence from a Payerne card body. Days,
+// months and years are matched positionally so days that omit their own month
+// or year inherit the next one to their right (handles "du 5 au 7 juin 2026",
+// "le 26 et 27 juin 2026", "le 31 juillet et 1er août 2026", cross-year ranges).
+function parsePayerneDateSentence(text, fallbackYear = 2026) {
+  const t = clean(text).toLowerCase().replace(/(\d)\s*er\b/g, '$1');
+  const sm = t.match(/(?:a|ont|aura|auront)\s+lieu[^.]*|se\s+d[ée]roule[nt]?[^.]*|\bdu\s+\d[^.]*/);
+  let sentence = sm ? sm[0] : t;
+  sentence = sentence.split(/\b(?:emplacement|horaires?|informations?|programme|animations|plus d)/i)[0];
+  const months = [...sentence.matchAll(new RegExp(`\\b(${MONTH_RE})\\b`, 'gi'))].map(m => ({ i: m.index, v: MONTHS[m[1].toLowerCase().replace(/\.$/, '')] }));
+  const years = [...sentence.matchAll(/\b(20\d{2})\b/g)].map(m => ({ i: m.index, v: m[1] }));
+  const days = [...sentence.matchAll(/\b(\d{1,2})\b/g)].map(m => ({ i: m.index, v: m[1].padStart(2, '0') }));
+  if (!days.length || !months.length) return null;
+  const pick = (arr, idx) => { const after = arr.filter(x => x.i >= idx); return (after[0] || arr[arr.length - 1]).v; };
+  const toDate = d => `${pick(years, d.i) || fallbackYear}-${pick(months, d.i)}-${d.v}`;
+  const isRange = (/\bdu\b/.test(sentence) && /\bau\b/.test(sentence)) || /\bet\b/.test(sentence) || days.length > 1;
+  const startDate = toDate(days[0]);
+  const endDate = isRange ? toDate(days[days.length - 1]) : null;
+  return { startDate, endDate: endDate === startDate ? null : endDate };
+}
+
+function extractPayerneCards(html, pageUrl = SOURCES.payerne.url) {
+  const $ = cheerio.load(html);
+  const cards = [];
+  $('.card').each((_, el) => {
+    const $el = $(el);
+    const header = $el.find('.card-header').first();
+    if (!header.length) return;
+    const headingId = (header.attr('id') || '').replace(/^heading-?/, '');
+    const headerText = clean(header.find('.col').first().text() || header.text());
+    const $body = $el.find('.card-body.the-content').first();
+    if (!headerText || !$body.length) return;
+    const title = clean(headerText.replace(/^\s*\d[^-–]*[-–]\s*/, '')) || headerText;
+    const dateSentence = clean($body.find('p').first().text());
+    const bodyText = clean($body.text());
+    const dates = parsePayerneDateSentence(dateSentence || bodyText) || parsePayerneDateSentence(headerText);
+    if (!dates) return;
+    let emplacement = '';
+    let horaire = '';
+    $body.find('li').each((__, li) => {
+      const txt = clean($(li).text());
+      if (/^emplacement\s*:/i.test(txt)) emplacement = clean(txt.replace(/^emplacement\s*:/i, ''));
+      else if (/^horaires?\s*:/i.test(txt) && !horaire) horaire = clean(txt.replace(/^horaires?\s*:/i, ''));
+    });
+    const links = [];
+    $body.find('a[href]').each((__, a) => {
+      const href = canonicalUrl($(a).attr('href'), pageUrl);
+      if (href && !/payerne\.ch\/manifestations/i.test(href)) links.push(href);
+    });
+    const fragment = headingId ? `#heading-${headingId}` : `#${sha(title)}`;
+    cards.push({
+      title, startDate: dates.startDate, endDate: dates.endDate, emplacement, horaire,
+      description: bodyText, url: `${pageUrl}${fragment}`, officialSources: uniqBy(links, x => x), provenance: pageUrl
+    });
+  });
+  return uniqBy(cards, c => `${c.title}|${c.startDate}`);
+}
+
+async function scrapePayerne() {
+  let html;
+  try {
+    html = fetchPayerneHtml(SOURCES.payerne.url, 30000);
+  } catch (e) {
+    return [{ source: 'payerne', title: 'Payerne manifestations', url: SOURCES.payerne.url, error: e.message }];
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const events = extractPayerneCards(html, SOURCES.payerne.url).map(c => {
+    const priceText = (c.description.match(/gratuit\w*|entr[ée]e libre|chf\s?\d+[.\-]?\d*|\d+[.\-]\s?(?:chf|frs?)\b/i) || [''])[0];
+    return normalizeEvent({
+      source: 'payerne', title: c.title, startDate: isoDate(c.startDate, c.horaire), endDate: c.endDate,
+      locationName: c.emplacement || 'Payerne', locationText: [c.emplacement, 'Payerne'].filter(Boolean).join(', '),
+      city: cityFromLocation(c.emplacement, 'Payerne'), url: c.url, description: c.description,
+      ageText: /enfants?|famille|jeunesse|jouets?|p[ée]tanque|march[ée] du jeu/i.test(c.description) ? 'tout public / famille' : '',
+      priceText: clean(priceText), officialSources: c.officialSources,
+      sourceProvenance: `Commune de Payerne – manifestations: ${SOURCES.payerne.url}`,
+      evidence: clean(`${c.startDate}${c.endDate ? ' → ' + c.endDate : ''} | ${c.horaire || ''} | ${c.description}`).slice(0, 1200)
+    });
+  });
+  // Keep upcoming + currently-running occurrences (the page lists the full season).
+  return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -2771,7 +2883,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
@@ -2957,6 +3069,28 @@ function runFixtureTests() {
   assert.strictEqual(fribourgEvents[0].url, 'https://fribourg.ch/fr/regionlacdemorat/evenements/vullyrun/');
   assert(fribourgEvents[0].officialSources.some(u => /vullyrun\.ch/.test(u)), 'Fribourg fixture should keep the external official website');
   assert(fribourgEvents[0].tags.includes('sport'), 'Fribourg fixture should infer a sport tag from "course"');
+  // Payerne (Broye) communal manifestations — positional French date parsing.
+  assert.deepStrictEqual(parsePayerneDateSentence('a lieu le samedi 30 mai 2026.'), { startDate: '2026-05-30', endDate: null });
+  assert.deepStrictEqual(parsePayerneDateSentence('ont lieu du vendredi 5 au dimanche 7 juin 2026.'), { startDate: '2026-06-05', endDate: '2026-06-07' });
+  assert.deepStrictEqual(parsePayerneDateSentence('a lieu le vendredi 31 juillet et samedi 1 er août 2026.'), { startDate: '2026-07-31', endDate: '2026-08-01' });
+  assert.deepStrictEqual(parsePayerneDateSentence('a lieu du vendredi 30 octobre 2026 au dimanche 21 février 2027.'), { startDate: '2026-10-30', endDate: '2027-02-21' });
+  const payerneHtml = '<div class="card"><div class="card-header" id="heading-1-3">'
+    + '<div class="row align-items-center"><div class="col">5 au 7 juin - Caves ouvertes</div></div></div>'
+    + '<div id="collapse1-3" class="collapse"><div class="card-body the-content">'
+    + '<p>Les caves ouvertes ont lieu du vendredi 5 au dimanche 7 juin 2026.</p>'
+    + '<ul><li>Emplacement : Cave L&rsquo;Abbatiale, Payerne</li><li>Horaires : Vendredi 17 h 00 – 21 h 00</li></ul>'
+    + '<p>Informations :<a href="https://www.cave-abbatiale.ch/" target="_blank" rel="external">Cave L\'Abbatiale</a></p>'
+    + '</div></div></div>';
+  const payerneCards = extractPayerneCards(payerneHtml, SOURCES.payerne.url);
+  assert.strictEqual(payerneCards.length, 1);
+  assert.strictEqual(payerneCards[0].title, 'Caves ouvertes');
+  assert.strictEqual(payerneCards[0].startDate, '2026-06-05');
+  assert.strictEqual(payerneCards[0].endDate, '2026-06-07');
+  assert.strictEqual(payerneCards[0].url, 'https://www.payerne.ch/manifestations/#heading-1-3');
+  assert(payerneCards[0].officialSources.some(u => /cave-abbatiale\.ch/.test(u)), 'Payerne fixture should keep the external official info link');
+  const payerneEvent = normalizeEvent({ source: 'payerne', title: payerneCards[0].title, startDate: isoDate(payerneCards[0].startDate, payerneCards[0].horaire), endDate: payerneCards[0].endDate, locationName: payerneCards[0].emplacement, city: cityFromLocation(payerneCards[0].emplacement, 'Payerne'), url: payerneCards[0].url, description: payerneCards[0].description });
+  assert.strictEqual(payerneEvent.startDate, '2026-06-05T17:00:00+02:00');
+  assert.strictEqual(payerneEvent.city, 'Payerne');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -3051,4 +3185,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne };
