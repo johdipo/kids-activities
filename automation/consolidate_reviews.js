@@ -174,6 +174,105 @@ function renderTelegram(records, queue) {
   return lines.join('\n').trim() + '\n';
 }
 
+/* --- Deterministic (Option A) path: build the digest straight from the
+ * scored event-review-queue.json, with no per-event LLM reviews. Used by the
+ * --command cron so the family always gets a source-backed summary even when
+ * no LLM review step ran. --- */
+
+function frDateShort(iso) {
+  if (!iso) return '';
+  const [, m, d] = iso.slice(0, 10).split('-');
+  const time = iso.includes('T') ? ` à ${iso.slice(11, 16).replace(':', 'h')}` : '';
+  return `${d}.${m}${time}`;
+}
+
+function labelToVerdict(label) {
+  const l = String(label || '').toLowerCase();
+  if (/recommand/.test(l)) return 'recommended';
+  if (/secondaire|à voir|a voir/.test(l)) return 'secondary';
+  if (/rejet|éviter|eviter|écart|ecart/.test(l)) return 'rejected';
+  return 'secondary';
+}
+
+function inWindow(iso, window) {
+  if (!iso || !window) return false;
+  const day = iso.slice(0, 10);
+  return day >= window.start && day < window.endExclusive;
+}
+
+function deterministicSummaryLine(event, window) {
+  const title = String(event.title || '').trim();
+  const loc = String(event.location || '').split(',')[0].trim();
+  const parts = [title];
+  if (loc) parts.push(loc);
+  let line = parts.join(' — ');
+  line += inWindow(event.startDate, window)
+    ? ` · ${frDateShort(event.startDate)}`
+    : ` · à l’affiche ce week-end`;
+  const caveats = (event.caveats || []).filter(Boolean).slice(0, 2);
+  if (caveats.length) line += `. À vérifier : ${caveats.join(' ; ')}`;
+  return line.replace(/\s+/g, ' ').trim();
+}
+
+function renderTelegramFromQueue(records, queue) {
+  const deduped = dedupeReviewedRecords(records);
+  const recommended = deduped.filter(r => r.verdict === 'recommended');
+  const secondary = deduped.filter(r => r.verdict === 'secondary');
+  const rejected = deduped.filter(r => r.verdict === 'rejected');
+  if (!recommended.length && !secondary.length) {
+    throw new Error('no sendable events in queue; refusing to generate final digest');
+  }
+  const lines = [
+    `Idées famille pour ce week-end — ${frWindow(queue.window)}`,
+    '',
+    'Sélection automatique (scoring famille, sources publiques). Vérifiez horaires, prix et réservation sur la page avant de partir.'
+  ];
+  let i = 1;
+  for (const r of recommended) {
+    lines.push('', `${i++}. ${r.summaryLine}`, r.event.url);
+  }
+  if (secondary.length) {
+    lines.push('', 'Options secondaires :');
+    for (const r of secondary) {
+      lines.push('', `• ${r.summaryLine}`, r.event.url);
+    }
+  }
+  if (rejected.length) {
+    lines.push('', `Écarté : ${rejected.map(r => r.event.title).join(', ')}.`);
+  }
+  return lines.join('\n').trim() + '\n';
+}
+
+function consolidateFromQueue(runDir) {
+  const queuePath = path.join(runDir, 'event-review-queue.json');
+  if (!fs.existsSync(queuePath)) throw new Error(`missing event-review-queue.json in ${runDir}`);
+  const queue = readJson(queuePath);
+  const events = queue.events || [];
+  if (!events.length) throw new Error(`event-review-queue.json has no events: ${queuePath}`);
+  const records = events.map(event => ({
+    event,
+    file: queuePath,
+    exists: true,
+    verdict: labelToVerdict(event.label),
+    summaryLine: deterministicSummaryLine(event, queue.window),
+    error: ''
+  }));
+  const index = renderIndex(records, runDir);
+  const telegram = renderTelegramFromQueue(records, queue);
+  const reviewsDir = path.join(runDir, 'event-reviews');
+  fs.mkdirSync(reviewsDir, { recursive: true });
+  fs.writeFileSync(path.join(reviewsDir, 'INDEX.md'), index + '\n');
+  fs.writeFileSync(path.join(runDir, 'telegram-summary-reviewed.txt'), telegram);
+  return {
+    runDir,
+    mode: 'from-queue',
+    reviewed: records.length,
+    recommended: records.filter(r => r.verdict === 'recommended').length,
+    secondary: records.filter(r => r.verdict === 'secondary').length,
+    rejected: records.filter(r => r.verdict === 'rejected').length
+  };
+}
+
 function consolidate(runDir) {
   const queuePath = path.join(runDir, 'event-review-queue.json');
   if (!fs.existsSync(queuePath)) throw new Error(`missing event-review-queue.json in ${runDir}`);
@@ -195,7 +294,8 @@ function consolidate(runDir) {
 function main() {
   const explicit = process.argv.find(a => a.startsWith('--run-dir='));
   const runDir = explicit ? path.resolve(explicit.split('=')[1]) : latestRunDir();
-  const result = consolidate(runDir);
+  const fromQueue = process.argv.includes('--from-queue');
+  const result = fromQueue ? consolidateFromQueue(runDir) : consolidate(runDir);
   console.log(JSON.stringify(result, null, 2));
 }
 
@@ -203,4 +303,4 @@ if (require.main === module) {
   try { main(); } catch (err) { console.error(err.stack || err.message); process.exit(1); }
 }
 
-module.exports = { consolidate, parseVerdict, parseSummaryLine };
+module.exports = { consolidate, consolidateFromQueue, parseVerdict, parseSummaryLine };
