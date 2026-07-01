@@ -44,6 +44,14 @@ const LOCATION_KM_FROM_YVERDON = {
   murten: 38,
   avenches: 30,
   salavaux: 33,
+  'vully-les-lacs': 34,
+  vallamand: 34,
+  'mur (vully)': 35,
+  chabrey: 33,
+  constantine: 35,
+  montmagny: 32,
+  'villars-le-grand': 30,
+  bellerive: 36,
   cudrefin: 42,
   payerne: 25,
   'estavayer-le-lac': 22,
@@ -201,6 +209,22 @@ const SOURCES = {
     // curl --cacert instead of disabling verification with -k.
     caBundle: 'assets/payerne-digicert-chain.pem',
     kind: 'communal-manifestations-broye-agenda'
+  },
+  vullyLesLacs: {
+    // Commune de Vully-les-Lacs (Vaud, Broye-Vully): lakeside/vineyard terroir
+    // village agenda, distinct from the Fribourg-canton `fribourgTerroir` and the
+    // Broye tourism `avenches`/`payerne` sources. Strong La Dérivée / caves-ouvertes
+    // / free-festival taste fit (Vully blues, openair plage de Salavaux, Gâteaux du
+    // Vully, marché printanier, VullyRun). I-Web CMS: the agenda renders as static
+    // Bootstrap `.media` cards paginated at `/agenda/<page>` — upcoming events use a
+    // `<span>day</span>monthAbbrev` date (no year, chronological ascending) while past
+    // events switch to a `<span>dd.m.</span>YYYY` format, so upcoming events are read
+    // until the first past-format card. There is no per-event detail page, so events
+    // use a stable hash fragment of the agenda page as URL and keep the card's
+    // flyer/info link in officialSources.
+    url: 'https://vully-les-lacs.ch/agenda',
+    baseUrl: 'https://vully-les-lacs.ch',
+    kind: 'iweb-communal-vully-lakeside-agenda'
   },
   manualJohan: {
     url: 'manual://johan/kids-activities',
@@ -2837,6 +2861,137 @@ async function scrapePayerne() {
   return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
 }
 
+// --- Commune de Vully-les-Lacs (I-Web static agenda) ---------------------------
+// Node fetch is flaky on these I-Web communal sites (see echallens), so use a
+// curl-backed fetch for reliability and speed.
+function fetchVullyHtml(url, timeoutMs = 30000) {
+  const maxTime = Math.max(5, Math.ceil(timeoutMs / 1000));
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
+}
+
+function vullyPageUrl(page = 1) {
+  return page <= 1 ? SOURCES.vullyLesLacs.url : `${SOURCES.vullyLesLacs.url}/${page}`;
+}
+
+// Parse an upcoming Vully agenda date cell: `dayText` is the <span> content
+// ("4", "14-16") and `monthText` the trailing month abbreviation(s) ("juil.",
+// "août", "janv.-déc."). Returns null when the cell is a past-event cell (the
+// trailing text is a 4-digit year like "2024") or is unparseable. Years are NOT
+// assigned here — the listing is chronological, so years are resolved in order by
+// assignVullyYears.
+function parseVullyListingDate(dayText, monthText) {
+  const mt = clean(monthText);
+  if (/^\s*20\d{2}\s*$/.test(mt)) return null; // past-event cell (year in the month slot)
+  const monthMatches = [...mt.toLowerCase().matchAll(new RegExp(`(${MONTH_RE})`, 'gi'))]
+    .map(m => MONTHS[m[1].toLowerCase().replace(/\.$/, '')]).filter(Boolean);
+  if (!monthMatches.length) return null;
+  const dayNums = [...clean(dayText).matchAll(/\d{1,2}/g)].map(m => m[0].padStart(2, '0'));
+  if (!dayNums.length) return null;
+  const startMonth = monthMatches[0];
+  const endMonth = monthMatches[monthMatches.length - 1];
+  const startDay = dayNums[0];
+  const endDay = dayNums[dayNums.length - 1];
+  const isRange = dayNums.length > 1 || monthMatches.length > 1;
+  return { startDay, startMonth, endDay: isRange ? endDay : null, endMonth: isRange ? endMonth : startMonth };
+}
+
+// Extract the upcoming events from one agenda page, in listing order. Stops at the
+// first past-format card (reachedPast=true) because everything after it is past.
+function extractVullyListings(html, pageUrl = SOURCES.vullyLesLacs.url) {
+  const $ = cheerio.load(html);
+  const items = [];
+  let reachedPast = false;
+  $('.card-body .media').each((_, el) => {
+    if (reachedPast) return;
+    const $el = $(el);
+    const $date = $el.find('.media-date').first();
+    const $body = $el.find('.media-body').first();
+    if (!$date.length || !$body.length) return;
+    const dayText = clean($date.find('span').first().text());
+    const monthText = clean($date.clone().children().remove().end().text());
+    const title = clean($body.find('.media-title').first().text());
+    if (!title) return;
+    if (/^\s*20\d{2}\s*$/.test(monthText)) { reachedPast = true; return; } // past section begins
+    if (/annoncez\s+votre\s+manifestation/i.test(title)) return; // year-round placeholder card
+    const parsed = parseVullyListingDate(dayText, monthText);
+    if (!parsed) return;
+    const description = clean($body.children('div').not('.d-flex').first().text());
+    const links = [];
+    $body.find('a[href]').each((__, a) => {
+      const href = $(a).attr('href');
+      if (href && /^https?:/i.test(href)) links.push(href);
+    });
+    items.push({ ...parsed, title, description, links: uniqBy(links, x => x), dateText: clean(`${dayText} ${monthText}`) });
+  });
+  return { items, reachedPast };
+}
+
+// Resolve years for chronological (ascending) upcoming listings. The first event
+// year is inferred from the current month; subsequent years increment whenever the
+// month wraps backwards (Dec -> Jan) relative to the previous event.
+function assignVullyYears(listings, now = new Date()) {
+  const curY = now.getUTCFullYear();
+  const curM = now.getUTCMonth() + 1;
+  let prevMonth = null, prevYear = null;
+  return listings.map(l => {
+    const sm = Number(l.startMonth);
+    let year;
+    if (prevMonth === null) year = sm >= curM ? curY : curY + 1;
+    else year = sm < prevMonth ? prevYear + 1 : prevYear;
+    const startDate = `${year}-${l.startMonth}-${l.startDay}`;
+    let endDate = null;
+    if (l.endDay) {
+      const em = Number(l.endMonth);
+      const endYear = em < sm ? year + 1 : year;
+      endDate = `${endYear}-${l.endMonth}-${l.endDay}`;
+    }
+    prevMonth = sm; prevYear = year;
+    return { ...l, startDate, endDate: endDate === startDate ? null : endDate };
+  });
+}
+
+const VULLY_VILLAGES = ['Salavaux', 'Vallamand', 'Mur', 'Chabrey', 'Constantine', 'Montmagny', 'Villars-le-Grand', 'Bellerive', 'Cotterd', 'Guévaux'];
+
+async function scrapeVully() {
+  const listings = [];
+  let stop = false;
+  for (let page = 1; page <= 6 && !stop; page++) {
+    let html;
+    try {
+      html = fetchVullyHtml(vullyPageUrl(page), 30000);
+    } catch (e) {
+      if (page === 1) return [{ source: 'vullyLesLacs', title: 'Vully-les-Lacs agenda', url: SOURCES.vullyLesLacs.url, error: e.message }];
+      break;
+    }
+    const { items, reachedPast } = extractVullyListings(html, SOURCES.vullyLesLacs.url);
+    listings.push(...items);
+    if (reachedPast || items.length === 0) stop = true;
+  }
+  const dated = assignVullyYears(listings);
+  const today = new Date().toISOString().slice(0, 10);
+  const events = dated.map(l => {
+    const haystack = `${l.title} ${l.description}`;
+    const village = VULLY_VILLAGES.find(v => new RegExp(`\\b${v}\\b`, 'i').test(haystack)) || '';
+    const priceText = (l.description.match(/gratuit\w*|entr[ée]e libre|chf\s?\d+[.\-]?\d*|\d+[.\-]\s?(?:chf|frs?)\b|d[èe]s\s?\d+[.\-]/i) || [''])[0];
+    return normalizeEvent({
+      source: 'vullyLesLacs', title: l.title,
+      startDate: isoDate(l.startDate, l.description), endDate: l.endDate,
+      locationName: village || 'Vully-les-Lacs',
+      locationText: [village, 'Vully-les-Lacs'].filter(Boolean).join(', '),
+      city: 'Vully-les-Lacs',
+      url: `${SOURCES.vullyLesLacs.url}#${sha(`${l.title}|${l.startDate}`)}`,
+      description: l.description || l.title,
+      ageText: /enfants?|famille|jeunesse|tout public|gâteaux|chasse aux|contes?|marmots?/i.test(haystack) ? 'tout public / famille' : '',
+      priceText: clean(priceText),
+      tags: inferTags(`${haystack} Vully lac vignoble terroir village`),
+      sourceProvenance: `Commune de Vully-les-Lacs – agenda: ${SOURCES.vullyLesLacs.url} (${l.dateText})`,
+      officialSources: [SOURCES.vullyLesLacs.url, ...l.links].filter(Boolean),
+      evidence: clean(`${l.dateText} | ${l.startDate}${l.endDate ? ' → ' + l.endDate : ''} | ${l.description} | ${l.links.join(' ')}`).slice(0, 1200)
+    });
+  });
+  return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -2883,7 +3038,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
@@ -3091,6 +3246,34 @@ function runFixtureTests() {
   const payerneEvent = normalizeEvent({ source: 'payerne', title: payerneCards[0].title, startDate: isoDate(payerneCards[0].startDate, payerneCards[0].horaire), endDate: payerneCards[0].endDate, locationName: payerneCards[0].emplacement, city: cityFromLocation(payerneCards[0].emplacement, 'Payerne'), url: payerneCards[0].url, description: payerneCards[0].description });
   assert.strictEqual(payerneEvent.startDate, '2026-06-05T17:00:00+02:00');
   assert.strictEqual(payerneEvent.city, 'Payerne');
+  // --- Vully-les-Lacs listing parsing ---
+  assert.deepStrictEqual(parseVullyListingDate('4', 'juil.'), { startDay: '04', startMonth: '07', endDay: null, endMonth: '07' });
+  assert.deepStrictEqual(parseVullyListingDate('14-16', 'août'), { startDay: '14', startMonth: '08', endDay: '16', endMonth: '08' });
+  assert.strictEqual(parseVullyListingDate('21.9.', '2024'), null, 'Vully past-format cell (year) should be skipped');
+  const vullyHtml = '<div class="card"><div class="card-body no-padding-bottom">'
+    + '<div class="media"><p class="media-date align-self-start mr-3"><span>1-31</span>janv.-déc.</p><div class="media-body mb-2"><h6 class="media-title">Annoncez votre manifestation !</h6><div>En cliquant sur le lien suivant...</div></div></div>'
+    + '<div class="media"><p class="media-date align-self-start mr-3"><span>4</span>juil.</p><div class="media-body mb-2"><h6 class="media-title">Cinéma Open Air</h6><div>Cinéma Open Air à la place de jeux de Vallamand, Route de Cudrefin. Petite restauration sur place. 19h00 - 00h00</div><div class="d-flex align-items-baseline"><i class="icon"></i> <a href="https://www.vully-les-lacs.ch/uploads/flyer.pdf">Flyer openair</a></div></div></div>'
+    + '<div class="media"><p class="media-date align-self-start mr-3"><span>14-16</span>août</p><div class="media-body mb-2"><h6 class="media-title">Tir annuel</h6><div>à Chabrey, Les Blaireaux</div></div></div>'
+    + '<div class="media"><p class="media-date align-self-start mr-3"><span>27.6.</span>2026</p><div class="media-body mb-2"><h6 class="media-title">Route Gourmande du Vully</h6><div>événement passé</div></div></div>'
+    + '</div></div>';
+  const vullyExtract = extractVullyListings(vullyHtml, SOURCES.vullyLesLacs.url);
+  assert.strictEqual(vullyExtract.items.length, 2, 'Vully should skip the placeholder and stop at the past-format card');
+  assert.strictEqual(vullyExtract.reachedPast, true, 'Vully should flag when the past section is reached');
+  assert.strictEqual(vullyExtract.items[0].title, 'Cinéma Open Air');
+  assert(vullyExtract.items[0].links.some(u => /flyer\.pdf/.test(u)), 'Vully should keep the card flyer/info link');
+  const vullyDated = assignVullyYears(vullyExtract.items, new Date('2026-07-01T07:00:00Z'));
+  assert.strictEqual(vullyDated[0].startDate, '2026-07-04');
+  assert.strictEqual(vullyDated[1].startDate, '2026-08-14');
+  assert.strictEqual(vullyDated[1].endDate, '2026-08-16');
+  const vullyWrap = assignVullyYears([
+    { startDay: '13', startMonth: '12', endDay: null, endMonth: '12' },
+    { startDay: '10', startMonth: '01', endDay: null, endMonth: '01' }
+  ], new Date('2026-07-01T07:00:00Z'));
+  assert.strictEqual(vullyWrap[0].startDate, '2026-12-13');
+  assert.strictEqual(vullyWrap[1].startDate, '2027-01-10', 'Vully should roll the year forward when the month wraps backwards');
+  const vullyEvent = normalizeEvent({ source: 'vullyLesLacs', title: vullyExtract.items[0].title, startDate: isoDate(vullyDated[0].startDate, vullyExtract.items[0].description), endDate: null, locationName: 'Vallamand', locationText: 'Vallamand, Vully-les-Lacs', city: 'Vully-les-Lacs', url: `${SOURCES.vullyLesLacs.url}#${sha('x')}`, description: vullyExtract.items[0].description });
+  assert.strictEqual(vullyEvent.startDate, '2026-07-04T19:00:00+02:00', 'Vully should extract the start time from the description');
+  assert.strictEqual(vullyEvent.city, 'Vully-les-Lacs');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -3185,4 +3368,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully };
