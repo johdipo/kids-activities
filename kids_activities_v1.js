@@ -42,6 +42,8 @@ const LOCATION_KM_FROM_YVERDON = {
   lausanne: 39,
   morat: 38,
   murten: 38,
+  'münchenwiler': 40,
+  muenchenwiler: 40,
   avenches: 30,
   salavaux: 33,
   'vully-les-lacs': 34,
@@ -225,6 +227,23 @@ const SOURCES = {
     url: 'https://vully-les-lacs.ch/agenda',
     baseUrl: 'https://vully-les-lacs.ch',
     kind: 'iweb-communal-vully-lakeside-agenda'
+  },
+  murtenMorat: {
+    // Ville de Morat / Stadt Murten (bilingue, rive du lac de Morat): agenda
+    // communal officiel des manifestations. Ville touristique lacustre médiévale —
+    // fort ancrage La Dérivée / festivals gratuits / famille (Stadtfest Murten,
+    // Open Air Kino, Freilicht-Theater «Murten 1476», Murtenlauf, Brocante,
+    // Spielfest famille, marchés de Noël/Saint-Martin). Distinct du `fribourgTerroir`
+    // (couche tourisme cantonale, régions 182+194) car ce sont les manifestations
+    // communales de la Ville, et distinct de `vullyLesLacs`/`payerne`/`avenches`.
+    // CMS I-Web comme Sainte-Croix/Vallorbe: la page `/anlaesseaktuelles` expose la
+    // charge utile JSON `#anlassList[data-entities]` (id, name+lien `/_rte/anlass/<id>`,
+    // ort, lokalitaet, datumVon/datumBis en epoch ms, organisator). Chaque événement
+    // utilise sa page de détail `/_rte/anlass/<id>` comme URL stable et est enrichi
+    // (heure «HH.MM Uhr», prix, description en allemand).
+    url: 'https://www.murten-morat.ch/anlaesseaktuelles',
+    baseUrl: 'https://www.murten-morat.ch',
+    kind: 'iweb-communal-morat-lakeside-agenda'
   },
   manualJohan: {
     url: 'manual://johan/kids-activities',
@@ -2992,6 +3011,127 @@ async function scrapeVully() {
   return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
 }
 
+// --- Morat / Murten — agenda communal (I-Web) --------------------------------
+function murtenMoratEventUrl(id) {
+  return id ? canonicalUrl(`/_rte/anlass/${id}`, SOURCES.murtenMorat.baseUrl) : '';
+}
+
+// German detail date/time line, e.g. "15. Nov. 2026, 13.00 Uhr - 17.00 Uhr".
+// The listing epoch (datumVon) is authoritative for the day; we only pull the
+// start/end clock time from the detail page and normalize "13.00" -> "13:00".
+function parseMurtenDetailTime(text) {
+  const uhrMatches = [...clean(text).matchAll(/(\d{1,2})[.:h](\d{2})\s*Uhr/gi)];
+  if (!uhrMatches.length) return { startTime: '', endTime: '' };
+  const norm = m => `${String(Number(m[1])).padStart(2, '0')}:${m[2]}`;
+  return { startTime: norm(uhrMatches[0]), endTime: uhrMatches[1] ? norm(uhrMatches[1]) : '' };
+}
+
+function extractMurtenListings(html) {
+  const $ = cheerio.load(html);
+  const attr = $('#anlassList').attr('data-entities');
+  if (!attr) return [];
+  let payload;
+  try { payload = JSON.parse(attr); } catch { return []; }
+  return (payload.data || []).map(row => {
+    const name$ = cheerio.load(row.name || '');
+    const title = clean(name$.text() || row.name);
+    const link = name$('a').attr('href');
+    const id = row.id || (link && (link.match(/anlass\/(\d+)/) || [])[1]) || '';
+    const ort = clean(cheerio.load(row.ort || '').text() || row.ort || 'Murten');
+    const venue = clean(cheerio.load(row.lokalitaet || '').text() || row.lokalitaet || '');
+    const organisatorText = clean(cheerio.load(row.organisator || '').text() || row.organisator || '');
+    const organizer = /^https?:\/\//i.test(organisatorText) ? '' : organisatorText;
+    const organizerUrl = /^https?:\/\//i.test(organisatorText) ? organisatorText : ((row.organisator || '').match(/https?:\/\/[^"'\s<]+/) || [''])[0];
+    const startDate = iwebTimestampToZurichIso(row.datumVon || row['datumVon-sort']);
+    const endDate = iwebTimestampToZurichIso(row.datumBis || row['datumBis-sort']);
+    return {
+      id,
+      title,
+      url: murtenMoratEventUrl(id) || canonicalUrl(link, SOURCES.murtenMorat.url),
+      startDate: startDate ? startDate.slice(0, 10) : null,
+      endDate: endDate && endDate.slice(0, 10) !== (startDate || '').slice(0, 10) ? endDate.slice(0, 10) : null,
+      locationText: clean([venue, ort].filter(Boolean).join(', ')) || ort,
+      city: ort,
+      organizer,
+      organizerUrl
+    };
+  }).filter(x => x.id && x.title && x.startDate);
+}
+
+function parseMurtenDetail(html, fallback = {}) {
+  const $ = cheerio.load(html);
+  $('script, style, nav, header, footer').remove();
+  const mainText = clean($('main').first().text()) || clean($('body').text());
+  const { startTime, endTime } = parseMurtenDetailTime(mainText);
+  const startDate = startTime ? isoDateZurich(fallback.startDate, startTime) : fallback.startDate;
+  const endDate = fallback.endDate
+    ? (endTime ? isoDateZurich(fallback.endDate, endTime) : fallback.endDate)
+    : (endTime && startTime ? isoDateZurich(fallback.startDate, endTime) : null);
+  const freeMatch = mainText.match(/eintritt\s+frei|kostenlos|gratis|freier\s+eintritt/i);
+  const priceMatch = mainText.match(/CHF\s?\d+[.\-]?\d*|\d+[.\-]\s?(?:CHF|Fr\.?)\b/i);
+  const price = freeMatch ? freeMatch[0] : (priceMatch ? priceMatch[0] : '');
+  // Description: drop the leading breadcrumb/title and the date/time sentence.
+  let description = mainText;
+  if (fallback.title) description = description.replace(fallback.title, ' ');
+  description = clean(description
+    .replace(/^.*?(?:Inhalt|Kontakt)?\s*/i, m => m.length > 400 ? '' : m)
+    .replace(/\d{1,2}\.\s*[A-Za-zä]+\.?\s*\d{4},?\s*\d{1,2}[.:h]\d{2}\s*Uhr(?:\s*-\s*\d{1,2}[.:h]\d{2}\s*Uhr)?/i, ' ')
+  ).slice(0, 700) || fallback.organizer || fallback.title;
+  const familyHay = `${fallback.title} ${description} ${fallback.organizer}`;
+  const ageText = /famil|kinder|\bkind\b|spielfest|spielnachmittag|jugend|für alle|puur|märit|märt|markt|brocante|fest\b|kino|theater|lauf/i.test(familyHay)
+    ? 'famille / tout public possible' : '';
+  const officialSources = [fallback.organizerUrl, fallback.url].filter(Boolean);
+  const evidence = clean([fallback.title, startDate, endDate, fallback.locationText, fallback.organizer, price, description].filter(Boolean).join(' | ')).slice(0, 1200);
+  return normalizeEvent({
+    source: 'murtenMorat',
+    title: fallback.title,
+    startDate,
+    endDate: endDate && endDate !== startDate ? endDate : (fallback.endDate && fallback.endDate !== fallback.startDate ? fallback.endDate : null),
+    locationName: (fallback.locationText || 'Murten').split(',')[0],
+    locationText: fallback.locationText || 'Murten',
+    city: fallback.city || 'Murten',
+    url: fallback.url,
+    description,
+    priceText: price,
+    ageText,
+    tags: inferTags(`${familyHay} Morat Murten lac lakeside vieille ville festival`),
+    sourceProvenance: `Ville de Morat / Stadt Murten — agenda des manifestations: ${fallback.url}`,
+    officialSources,
+    evidence
+  });
+}
+
+async function scrapeMurtenMorat() {
+  let html;
+  try {
+    html = await fetchHtml(SOURCES.murtenMorat.url, 30000);
+  } catch (e) {
+    return [{ source: 'murtenMorat', title: 'Morat / Murten agenda', url: SOURCES.murtenMorat.url, error: e.message }];
+  }
+  const listings = extractMurtenListings(html);
+  const today = new Date().toISOString().slice(0, 10);
+  const events = [];
+  for (const item of listings) {
+    // Skip clearly past single-day events before spending a detail fetch.
+    if (((item.endDate || item.startDate) || '').slice(0, 10) < today) continue;
+    try {
+      const detailHtml = await fetchHtml(item.url, 20000);
+      events.push(parseMurtenDetail(detailHtml, item));
+    } catch (e) {
+      events.push(normalizeEvent({
+        source: 'murtenMorat', title: item.title, startDate: item.startDate, endDate: item.endDate,
+        locationName: (item.locationText || 'Murten').split(',')[0], locationText: item.locationText, city: item.city,
+        url: item.url, description: item.organizer || item.title,
+        tags: inferTags(`${item.title} ${item.organizer} Morat Murten lac`),
+        sourceProvenance: `Ville de Morat / Stadt Murten — agenda des manifestations: ${item.url}`,
+        officialSources: [item.organizerUrl, item.url].filter(Boolean),
+        evidence: clean([item.title, item.startDate, item.endDate, item.locationText, item.organizer].filter(Boolean).join(' | '))
+      }));
+    }
+  }
+  return uniqBy(events.filter(e => e.title && e.startDate), e => recommendationKey(e));
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -3038,7 +3178,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
@@ -3274,6 +3414,27 @@ function runFixtureTests() {
   const vullyEvent = normalizeEvent({ source: 'vullyLesLacs', title: vullyExtract.items[0].title, startDate: isoDate(vullyDated[0].startDate, vullyExtract.items[0].description), endDate: null, locationName: 'Vallamand', locationText: 'Vallamand, Vully-les-Lacs', city: 'Vully-les-Lacs', url: `${SOURCES.vullyLesLacs.url}#${sha('x')}`, description: vullyExtract.items[0].description });
   assert.strictEqual(vullyEvent.startDate, '2026-07-04T19:00:00+02:00', 'Vully should extract the start time from the description');
   assert.strictEqual(vullyEvent.city, 'Vully-les-Lacs');
+  const murtenEntities = JSON.stringify({ data: [
+    { id: '5464640', name: '<a href="/_rte/anlass/5464640">Spielfest</a>', ort: 'Murten', lokalitaet: 'Alte Turnhalle', datumVon: '1794697200000', datumBis: '1794697200000', organisator: 'Kulturkommission &amp; Ludothek' },
+    { id: '6515389', name: '<a href="/_rte/anlass/6515389">Open Air Kino</a>', ort: 'Murten', lokalitaet: 'Stadtgraben', datumVon: '1783290000000', datumBis: '1786402800000', organisator: 'https://openair-kino.ch' }
+  ] }).replace(/"/g, '&quot;');
+  const murtenRows = extractMurtenListings(`<table id="anlassList" data-entities="${murtenEntities}"></table>`);
+  assert.strictEqual(murtenRows.length, 2, 'Murten should parse both anlassList rows');
+  assert.strictEqual(murtenRows[0].title, 'Spielfest');
+  assert.strictEqual(murtenRows[0].startDate, '2026-11-15');
+  assert.strictEqual(murtenRows[0].endDate, null, 'Murten single-day event should collapse end date to null');
+  assert(murtenRows[0].url.endsWith('/_rte/anlass/5464640'), 'Murten should use the stable detail URL');
+  assert.strictEqual(murtenRows[1].endDate, '2026-08-11', 'Murten multi-day range should keep the end date');
+  assert.strictEqual(murtenRows[1].organizerUrl, 'https://openair-kino.ch', 'Murten should capture a URL organisateur as officialSource');
+  const murtenTime = parseMurtenDetailTime('15. Nov. 2026, 13.00 Uhr - 17.00 Uhr');
+  assert.strictEqual(murtenTime.startTime, '13:00');
+  assert.strictEqual(murtenTime.endTime, '17:00');
+  const murtenEvent = parseMurtenDetail('<main><h1>Spielfest</h1><p>Alte Turnhalle Prehlstrasse 1 3280 Murten 15. Nov. 2026, 13.00 Uhr - 17.00 Uhr Am Sonntag organisiert die Kulturkommission einen Spielnachmittag für alle Familien aus der Region. Eintritt frei.</p></main>', murtenRows[0]);
+  assert.strictEqual(murtenEvent.source, 'murtenMorat');
+  assert.strictEqual(murtenEvent.startDate, '2026-11-15T13:00:00+01:00', 'Murten should apply the detail start time to the listing date');
+  assert.strictEqual(murtenEvent.city, 'Murten');
+  assert(murtenEvent.priceText.match(/frei/i), 'Murten fixture should capture free-entry evidence');
+  assert(murtenEvent.officialSources.some(u => /_rte\/anlass\/5464640/.test(u)), 'Murten should keep the official detail URL');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -3368,4 +3529,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat };
