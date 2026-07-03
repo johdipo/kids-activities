@@ -245,6 +245,26 @@ const SOURCES = {
     baseUrl: 'https://www.murten-morat.ch',
     kind: 'iweb-communal-morat-lakeside-agenda'
   },
+  laSauge: {
+    // Centre-Nature BirdLife de La Sauge (La Sauge 1588 Cudrefin, VD), sur la rive
+    // NE du lac de Neuchâtel entre les réserves du Fanel et de Cudrefin, au coeur de
+    // la Grande Cariçaie. Fort ancrage La Dérivée / plein-air / lac / nature en
+    // famille (activités mensuelles pour tous: «Ça grouille dans la mare !»,
+    // «Dimanche nature», camps enfants, chauves-souris, EuroBirdwatch, journée de la
+    // biodiversité). Distinct des sources existantes: c'est un centre-nature, pas une
+    // commune ni la couche tourisme cantonale — Cudrefin/Estavayer côté événements
+    // n'exposent pas cet agenda (fribourgTerroir 182 couvre le tourisme, pas La Sauge).
+    // Page Drupal: l'agenda est un corps HTML rédigé à la main, une section
+    // `div.collapse[id=<mois>]` par mois (juin→novembre), chaque événement délimité
+    // par un `<hr>` avec `<h4>` date+horaire, `<p><strong>` titre, `<p>` description,
+    // `<p><i>` liens (Pour en savoir plus / inscription / Prix). Pas de page de détail
+    // par événement, donc chaque événement utilise un fragment `#sha(titre|date)`
+    // stable de la page agenda et conserve le lien «Pour en savoir plus» en
+    // officialSources. L'année de base vient de «programme annuel YYYY».
+    url: 'https://www.birdlife.ch/fr/content/la-sauge-agenda',
+    baseUrl: 'https://www.birdlife.ch',
+    kind: 'nature-center-birdlife-lakeside-family-agenda'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -3132,6 +3152,135 @@ async function scrapeMurtenMorat() {
   return uniqBy(events.filter(e => e.title && e.startDate), e => recommendationKey(e));
 }
 
+// --- Centre-Nature BirdLife de La Sauge (Cudrefin, Grande Cariçaie) -----------
+// Drupal page; Node fetch works, but use a curl-backed fetch for the same
+// reliability the other communal/CMS sources rely on.
+function fetchLaSaugeHtml(url, timeoutMs = 30000) {
+  const maxTime = Math.max(5, Math.ceil(timeoutMs / 1000));
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
+}
+
+// Parse a La Sauge `<h4>` date line, e.g. "Samedi 4 juillet, 13h – 15h",
+// "Lundi 13 juillet au vendredi 17 juillet, 8h30 – 17h", "Samedi 1er août, 20h – 22h30".
+// Times always follow the date (the first `\d+h` token starts the time part).
+// Days/months are matched positionally so a range's first day inherits the month
+// to its right. Years are NOT assigned here (see assignLaSaugeYears).
+function parseLaSaugeDateLine(text) {
+  let t = clean(text).toLowerCase().replace(/(\d)\s*er\b/g, '$1');
+  t = t.replace(/lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche/g, ' ');
+  const normTime = (h, m) => { const H = Number(h); return H > 23 ? '' : `${String(H).padStart(2, '0')}:${(m || '00').padStart(2, '0')}`; };
+  const times = [...t.matchAll(/(\d{1,2})\s*h\s*(\d{2})?/g)].map(m => normTime(m[1], m[2])).filter(Boolean);
+  const firstH = t.search(/\d{1,2}\s*h/);
+  const dateSeg = firstH >= 0 ? t.slice(0, firstH) : t;
+  const months = [...dateSeg.matchAll(new RegExp(`(${MONTH_RE})`, 'gi'))].map(m => ({ i: m.index, v: MONTHS[m[1].toLowerCase().replace(/\.$/, '')] }));
+  const days = [...dateSeg.matchAll(/\b(\d{1,2})\b/g)].map(m => ({ i: m.index, v: m[1].padStart(2, '0') }));
+  if (!days.length || !months.length) return null;
+  const pick = (arr, idx) => { const after = arr.filter(x => x.i >= idx); return (after[0] || arr[arr.length - 1]).v; };
+  const isRange = /\bau\b/.test(dateSeg) || days.length > 1;
+  return {
+    startDay: days[0].v, startMonth: pick(months, days[0].i),
+    endDay: isRange ? days[days.length - 1].v : null, endMonth: pick(months, days[days.length - 1].i),
+    startTime: times[0] || '', endTime: times[1] || '', dateText: clean(text)
+  };
+}
+
+// Extract La Sauge events in document order (month sections juin→novembre). Each
+// event is a `<h4>` date line followed by `<p><strong>` title, `<p>` description(s)
+// and a `<p><i>` meta line with links (Pour en savoir plus / inscription / Prix).
+function extractLaSaugeListings(html) {
+  const $ = cheerio.load(html);
+  const yearMatch = clean($.root().text()).match(/programme\s+annuel\s+(20\d{2})/i);
+  const baseYear = yearMatch ? Number(yearMatch[1]) : new Date().getFullYear();
+  const listings = [];
+  $('div.collapse[id]').each((_, div) => {
+    $(div).find('h4').each((__, h4) => {
+      const dl = parseLaSaugeDateLine($(h4).text());
+      if (!dl) return;
+      const block = $(h4).nextUntil('h4');
+      let title = '';
+      const descParts = [];
+      let meta = '';
+      const links = [];
+      block.filter('p').each((k, p) => {
+        const $p = $(p);
+        const txt = clean($p.text());
+        if (!txt) return;
+        if (!title && $p.find('strong').length) { title = clean($p.find('strong').first().text()); return; }
+        if ($p.find('a[href]').length && /savoir plus|inscription|prix|entr[ée]e|r[ée]servation/i.test(txt)) {
+          meta = txt;
+          $p.find('a[href]').each((___, a) => { const href = $(a).attr('href'); if (href) links.push(href); });
+          return;
+        }
+        descParts.push(txt);
+      });
+      if (!title) title = clean(block.filter('p').first().text());
+      if (!title) return;
+      listings.push({ ...dl, title, description: descParts.join(' '), meta, links, baseYear });
+    });
+  });
+  return listings;
+}
+
+// Assign calendar years to La Sauge listings in document order, seeded by the
+// page's "programme annuel YYYY" base year. Rolls the year forward if the month
+// sequence ever wraps backwards (future-proofs a saison spanning Dec→Jan).
+function assignLaSaugeYears(listings) {
+  let prevMonth = null, prevYear = null;
+  return listings.map(l => {
+    const sm = Number(l.startMonth);
+    let year;
+    if (prevMonth === null) year = l.baseYear;
+    else year = sm < prevMonth ? prevYear + 1 : prevYear;
+    const startDate = `${year}-${l.startMonth}-${l.startDay}`;
+    let endDate = null;
+    if (l.endDay) {
+      const em = Number(l.endMonth);
+      const endYear = em < sm ? year + 1 : year;
+      endDate = `${endYear}-${l.endMonth}-${l.endDay}`;
+    }
+    prevMonth = sm; prevYear = year;
+    return { ...l, startDate, endDate: endDate === startDate ? null : endDate };
+  });
+}
+
+async function scrapeLaSauge() {
+  let html;
+  try {
+    html = fetchLaSaugeHtml(SOURCES.laSauge.url, 30000);
+  } catch (e) {
+    return [{ source: 'laSauge', title: 'Centre-Nature BirdLife de La Sauge', url: SOURCES.laSauge.url, error: e.message }];
+  }
+  const dated = assignLaSaugeYears(extractLaSaugeListings(html));
+  const today = new Date().toISOString().slice(0, 10);
+  const venue = 'Centre-Nature BirdLife de La Sauge';
+  const events = dated.map(l => {
+    const hay = `${l.title} ${l.description} ${l.meta}`;
+    const free = /gratuit\w*|entr[ée]e libre/i.test(hay);
+    const price = free ? (hay.match(/gratuit\w*|entr[ée]e libre/i) || [''])[0]
+      : (/prix\s*:\s*entr[ée]e au centre/i.test(l.meta) ? 'Entrée au centre (voir horaires et tarifs)' : '');
+    // Non-http links (mailto:) stay evidence-only; keep http(s) links as officialSources.
+    const officialSources = uniqBy(l.links.filter(h => /^https?:/i.test(h)).map(h => canonicalUrl(h, SOURCES.laSauge.url)).filter(Boolean), x => x);
+    const familyLike = /enfants?|famille|camp|dimanche nature|mare|jumelles|oiseaux|souris|chauves?-souris|biodiversit|dessiner|nature|migrateur|grande cari[çc]aie/i.test(hay)
+      && !/journ[ée]e d.entretien|taille|fauchage/i.test(l.title);
+    return normalizeEvent({
+      source: 'laSauge', title: l.title,
+      startDate: isoDateZurich(l.startDate, l.startTime), endDate: l.endDate,
+      locationName: venue,
+      locationText: `${venue}, La Sauge, Cudrefin`,
+      city: 'Cudrefin',
+      url: `${SOURCES.laSauge.url}#${sha(`${l.title}|${l.startDate}`)}`,
+      description: l.description || l.title,
+      ageText: familyLike ? 'tout public / famille' : '',
+      priceText: clean(price),
+      tags: inferTags(`${hay} nature lac Grande Cariçaie oiseaux plein air famille Cudrefin`),
+      sourceProvenance: `Centre-Nature BirdLife de La Sauge – agenda: ${SOURCES.laSauge.url} (${l.dateText})`,
+      officialSources: [SOURCES.laSauge.url, ...officialSources].filter(Boolean),
+      evidence: clean(`${l.dateText} | ${l.startDate}${l.endDate ? ' → ' + l.endDate : ''} | ${l.description} | ${l.meta}`).slice(0, 1200)
+    });
+  });
+  return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -3178,7 +3327,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
@@ -3435,6 +3584,48 @@ function runFixtureTests() {
   assert.strictEqual(murtenEvent.city, 'Murten');
   assert(murtenEvent.priceText.match(/frei/i), 'Murten fixture should capture free-entry evidence');
   assert(murtenEvent.officialSources.some(u => /_rte\/anlass\/5464640/.test(u)), 'Murten should keep the official detail URL');
+  // --- La Sauge (Centre-Nature BirdLife, Cudrefin) --------------------------
+  assert.deepStrictEqual(
+    (({ startDay, startMonth, endDay, endMonth, startTime, endTime }) => ({ startDay, startMonth, endDay, endMonth, startTime, endTime }))(parseLaSaugeDateLine('Samedi 4 juillet, 13h – 15h')),
+    { startDay: '04', startMonth: '07', endDay: null, endMonth: '07', startTime: '13:00', endTime: '15:00' },
+    'La Sauge single-day date line'
+  );
+  assert.deepStrictEqual(
+    (({ startDay, startMonth, endDay, endMonth, startTime, endTime }) => ({ startDay, startMonth, endDay, endMonth, startTime, endTime }))(parseLaSaugeDateLine('Lundi 13 juillet au vendredi 17 juillet, 8h30 – 17h')),
+    { startDay: '13', startMonth: '07', endDay: '17', endMonth: '07', startTime: '08:30', endTime: '17:00' },
+    'La Sauge multi-day range with half-hour start'
+  );
+  assert.strictEqual(parseLaSaugeDateLine('Samedi 1er août, 20h – 22h30').startDay, '01', 'La Sauge should normalise "1er" to day 01');
+  const laSaugeListings = extractLaSaugeListings(
+    '<div class="node__content"><p>Ci-dessous le programme annuel 2026 en téléchargement.</p>'
+    + '<div class="collapse" id="juillet"><hr>'
+    + '<h4>Samedi 4 juillet, 13h &ndash; 15h</h4>'
+    + '<p><strong>&Ccedil;a grouille dans la mare !</strong></p>'
+    + '<p>Observation de la petite faune aquatique &agrave; l&rsquo;aide de loupes.</p>'
+    + '<p><i><a href="https://www.birdlife.ch/fr/content/la-sauge-rendez-vous-nature">Pour en savoir plus</a>. Sans inscription, arriv&eacute;e libre. <a href="https://www.birdlife.ch/fr/content/la-sauge-horaires-et-tarifs">Prix : Entr&eacute;e au centre</a></i></p>'
+    + '<hr><h4>Lundi 13 juillet au vendredi 17 juillet, 8h30 &ndash; 17h</h4>'
+    + '<p><strong>Camp non r&eacute;sidentiel pour enfants</strong></p>'
+    + '<p>Une semaine d&rsquo;activit&eacute;s immersives.</p>'
+    + '<p><i><a href="https://www.birdlife.ch/fr/content/la-sauge-camps">Pour en savoir plus</a>. Sur inscription</i></p>'
+    + '</div></div>'
+  );
+  assert.strictEqual(laSaugeListings.length, 2, 'La Sauge should extract both events');
+  assert.strictEqual(laSaugeListings[0].title, 'Ça grouille dans la mare !');
+  assert.strictEqual(laSaugeListings[0].baseYear, 2026, 'La Sauge should read the annual base year from the page');
+  const laSaugeDated = assignLaSaugeYears(laSaugeListings);
+  assert.strictEqual(laSaugeDated[0].startDate, '2026-07-04');
+  assert.strictEqual(laSaugeDated[1].startDate, '2026-07-13');
+  assert.strictEqual(laSaugeDated[1].endDate, '2026-07-17', 'La Sauge camp should keep the multi-day end date');
+  const laSaugeEvent = normalizeEvent({
+    source: 'laSauge', title: laSaugeListings[0].title, startDate: isoDateZurich(laSaugeDated[0].startDate, laSaugeListings[0].startTime), endDate: null,
+    locationName: 'Centre-Nature BirdLife de La Sauge', locationText: 'Centre-Nature BirdLife de La Sauge, La Sauge, Cudrefin', city: 'Cudrefin',
+    url: `${SOURCES.laSauge.url}#${sha('x')}`, description: laSaugeListings[0].description, ageText: 'tout public / famille',
+    priceText: 'Entrée au centre (voir horaires et tarifs)',
+    officialSources: [SOURCES.laSauge.url, 'https://www.birdlife.ch/fr/content/la-sauge-rendez-vous-nature']
+  });
+  assert.strictEqual(laSaugeEvent.startDate, '2026-07-04T13:00:00+02:00', 'La Sauge should apply the DST-aware start time');
+  assert.strictEqual(laSaugeEvent.city, 'Cudrefin');
+  assert(laSaugeEvent.tags.includes('nature'), 'La Sauge event should be tagged nature');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -3529,4 +3720,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge };
