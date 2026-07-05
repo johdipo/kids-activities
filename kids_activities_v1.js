@@ -55,6 +55,19 @@ const LOCATION_KM_FROM_YVERDON = {
   'villars-le-grand': 30,
   bellerive: 36,
   cudrefin: 42,
+  // Parc naturel régional Jura vaudois (Vallée de Joux / Jura-Nord vaudois)
+  'mont-la-ville': 28,
+  'l\'isle': 30,
+  'le pont': 33,
+  'l\'abbaye': 35,
+  'le sentier': 42,
+  'le chenit': 45,
+  'le brassus': 48,
+  'saint-cergue': 60,
+  'saint cergue': 60,
+  'st-cergue': 60,
+  givrine: 62,
+  'la givrine': 62,
   payerne: 25,
   'estavayer-le-lac': 22,
   estavayer: 22,
@@ -264,6 +277,26 @@ const SOURCES = {
     url: 'https://www.birdlife.ch/fr/content/la-sauge-agenda',
     baseUrl: 'https://www.birdlife.ch',
     kind: 'nature-center-birdlife-lakeside-family-agenda'
+  },
+  parcJuraVaudois: {
+    // Parc naturel régional Jura vaudois — programme d'activités (excursions,
+    // visites, ateliers) dans la Vallée de Joux / Jura-Nord vaudois (Le Sentier,
+    // Le Chenit, Mont-la-Ville, Saint-Cergue, Col de la Givrine…). ~19-30 sorties
+    // guidées nature/paysage/terroir par an, en petits groupes, souvent en famille
+    // (balade de l'herboriste, potager, chauves-souris, brame du cerf, champignons,
+    // contes d'hiver autour du feu, âne, refuges forestiers gourmands). Fort ancrage
+    // La Dérivée / plein-air / découverte / terroir, et région DISTINCTE des sources
+    // existantes (aucune couvre le Parc Jura vaudois / Vallée de Joux).
+    // Plateforme: le site tourne sur le réseau suisse des parcs (angebote.paerke.ch).
+    // La page /fr/activites est un listing statique `#posts-list a.mozaic-link`, une
+    // carte par activité avec `.date` (JJ.MM, sans année), `.time` (HH:MM > HH:MM),
+    // `.location` et un `<h3>` titre; chaque carte lie une page de détail stable
+    // `/fr/loisir/<id>` (description, «Lieu de rendez-vous» avec NPA+localité, «Prix»
+    // avec tarifs adulte/enfant). Le listing est trié chronologiquement, donc les
+    // années sont résolues dans l'ordre (assignParcJuraVaudoisYears).
+    url: 'https://parcjuravaudois.ch/fr/activites',
+    baseUrl: 'https://parcjuravaudois.ch',
+    kind: 'regional-nature-park-family-activities-agenda'
   },
   manualJohan: {
     url: 'manual://johan/kids-activities',
@@ -3281,6 +3314,146 @@ async function scrapeLaSauge() {
   return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
 }
 
+// --- Parc naturel régional Jura vaudois (Vallée de Joux / Jura-Nord vaudois) ---
+// Static listing on the Swiss parks platform. Use a curl-backed fetch for the same
+// reliability the other CMS sources rely on.
+function fetchParcJuraHtml(url, timeoutMs = 30000) {
+  const maxTime = Math.max(5, Math.ceil(timeoutMs / 1000));
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
+}
+
+// Parse a Parc Jura vaudois `.date` cell: "10.07" (single) or "18-19.07" (same-month
+// range). Returns day/month strings (no year — resolved by assignParcJuraVaudoisYears).
+function parseParcJuraVaudoisDate(text) {
+  const t = clean(text);
+  const m = t.match(/(\d{1,2})(?:\s*[-–]\s*(\d{1,2}))?\.(\d{1,2})/);
+  if (!m) return null;
+  const month = m[3].padStart(2, '0');
+  if (Number(month) < 1 || Number(month) > 12) return null;
+  return {
+    startDay: m[1].padStart(2, '0'), startMonth: month,
+    endDay: m[2] ? m[2].padStart(2, '0') : null, endMonth: m[2] ? month : null
+  };
+}
+
+// Parse a `.time` cell such as "09:15 ><br> 15:00" → { startTime, endTime }.
+function parseParcJuraVaudoisTime(text) {
+  const times = [...clean(text).matchAll(/(\d{1,2}):(\d{2})/g)].map(m => `${m[1].padStart(2, '0')}:${m[2]}`);
+  return { startTime: times[0] || '', endTime: times[1] || '' };
+}
+
+// Extract the activity cards from the /fr/activites listing, in document (chronological)
+// order. Each card links a stable /fr/loisir/<id> detail page.
+function extractParcJuraVaudoisListings(html, baseUrl = SOURCES.parcJuraVaudois.baseUrl) {
+  const $ = cheerio.load(html);
+  const items = [];
+  $('#posts-list a.mozaic-link').each((_, a) => {
+    const $a = $(a);
+    const href = $a.attr('href') || '';
+    const idMatch = href.match(/\/loisir\/(\d+)/);
+    if (!idMatch) return;
+    const $info = $a.find('.mozaic-info').first();
+    const parsed = parseParcJuraVaudoisDate($info.find('.date').first().text());
+    if (!parsed) return;
+    const { startTime, endTime } = parseParcJuraVaudoisTime($info.find('.time').first().text());
+    const location = clean($info.find('.location').first().text());
+    let title = clean($a.find('h3').first().text()) || clean($a.attr('title') || '');
+    // Strip status prefixes ("NOUVEAU - ", "COMPLET - ") from the display title but
+    // remember them so a full activity keeps a caveat and NEW ones are still surfaced.
+    const complet = /^\s*COMPLET\b/i.test(title);
+    title = title.replace(/^\s*(NOUVEAU|COMPLET)\s*-\s*/i, '').trim();
+    if (!title) return;
+    items.push({
+      id: idMatch[1], url: canonicalUrl(href, baseUrl) || `${baseUrl}/fr/loisir/${idMatch[1]}`,
+      title, ...parsed, startTime, endTime, location, complet,
+      dateText: clean($info.find('.date').first().text())
+    });
+  });
+  return items;
+}
+
+// Resolve years for chronological (ascending) listings: first event year from the
+// current month, then increment whenever the month wraps backwards (Dec -> Jan).
+function assignParcJuraVaudoisYears(listings, now = new Date()) {
+  const curY = now.getUTCFullYear();
+  const curM = now.getUTCMonth() + 1;
+  let prevMonth = null, prevYear = null;
+  return listings.map(l => {
+    const sm = Number(l.startMonth);
+    let year;
+    if (prevMonth === null) year = sm >= curM ? curY : curY + 1;
+    else year = sm < prevMonth ? prevYear + 1 : prevYear;
+    const startDate = `${year}-${l.startMonth}-${l.startDay}`;
+    let endDate = null;
+    if (l.endDay) endDate = `${year}-${l.endMonth}-${l.endDay}`;
+    prevMonth = sm; prevYear = year;
+    return { ...l, startDate, endDate: endDate === startDate ? null : endDate };
+  });
+}
+
+// Enrich a listing from its /fr/loisir/<id> detail page: description, meeting-point
+// address (NPA + town), and price/tarif evidence (free vs adult/child CHF tariffs).
+function parseParcJuraVaudoisDetail(html, listing) {
+  const $ = cheerio.load(html);
+  const description = clean($('.activite_description').first().text()) || listing.title;
+  // "Lieu de rendez-vous" block: <p>venue<br>NPA town</p>
+  let address = '';
+  $('.activite_block').each((_, b) => {
+    const h2 = clean($(b).find('h2').first().text());
+    if (/rendez-vous|lieu/i.test(h2) && !address) address = clean($(b).find('p').first().text());
+  });
+  const cityMatch = address.match(/(?<!\d)\d{4}\s+([A-Za-zÀ-ÿ'’ -]+?)\s*$/);
+  const priceRaw = clean($('.activite_prix').first().text().replace(/^\s*Prix\s*/i, ''));
+  const free = /gratuit|entr[ée]e libre|offert/i.test(`${priceRaw} ${description}`);
+  const childPrice = priceRaw.match(/enfant[^:]*:\s*(\d+)\s*chf/i);
+  const priceText = free ? 'Gratuit' : clean(priceRaw).slice(0, 200);
+  // Family-friendliness evidence: an explicit child tariff, or family/kid keywords.
+  const hay = `${listing.title} ${description}`;
+  const familyLike = !!childPrice || /enfants?|famille|d[èe]s\s*\d+\s*ans|conte|potager|champignon|[âa]ne|chauve|animal|nature en famille/i.test(hay);
+  return { description, address, city: cityMatch ? clean(cityMatch[1]) : '', priceText, childPrice: childPrice ? Number(childPrice[1]) : null, familyLike };
+}
+
+async function scrapeParcJuraVaudois() {
+  let html;
+  try {
+    html = fetchParcJuraHtml(SOURCES.parcJuraVaudois.url, 30000);
+  } catch (e) {
+    return [{ source: 'parcJuraVaudois', title: 'Parc Jura vaudois — activités', url: SOURCES.parcJuraVaudois.url, error: e.message }];
+  }
+  const dated = assignParcJuraVaudoisYears(extractParcJuraVaudoisListings(html));
+  const today = new Date().toISOString().slice(0, 10);
+  const upcoming = dated.filter(l => ((l.endDate || l.startDate) || '').slice(0, 10) >= today);
+  const events = [];
+  const batchSize = 6;
+  for (let i = 0; i < upcoming.length; i += batchSize) {
+    const batch = upcoming.slice(i, i + batchSize);
+    const parsed = await Promise.all(batch.map(async (l) => {
+      let detail = { description: l.title, address: '', city: '', priceText: '', childPrice: null, familyLike: false };
+      try { detail = parseParcJuraVaudoisDetail(await fetchHtml(l.url, 20000), l); } catch { /* listing-level fallback */ }
+      const city = detail.city || (l.location || '').replace(/^Saint Cergue$/i, 'Saint-Cergue');
+      const locationText = clean([detail.address, l.location].filter(Boolean).join(' · ')) || l.location;
+      const caveats = l.complet ? 'COMPLET (activité affichée complète — à vérifier avant déplacement)' : '';
+      return normalizeEvent({
+        source: 'parcJuraVaudois', title: l.title,
+        startDate: isoDateZurich(l.startDate, l.startTime), endDate: l.endDate,
+        locationName: (locationText || 'Parc Jura vaudois').split('·')[0].trim() || 'Parc Jura vaudois',
+        locationText: locationText || 'Parc naturel régional Jura vaudois',
+        city,
+        url: l.url,
+        description: clean([detail.description, caveats].filter(Boolean).join(' — ')),
+        ageText: detail.familyLike ? (detail.childPrice != null ? `famille (tarif enfant ${detail.childPrice} CHF)` : 'tout public / famille') : '',
+        priceText: detail.priceText,
+        tags: inferTags(`${l.title} ${detail.description} ${l.location} nature plein air découverte Jura vaudois famille terroir`),
+        sourceProvenance: `Parc naturel régional Jura vaudois — activités: ${l.url} (${l.dateText}${l.startTime ? ' ' + l.startTime : ''})`,
+        officialSources: [l.url],
+        evidence: clean([l.dateText, l.startDate, l.endDate, l.startTime && `${l.startTime}${l.endTime ? '–' + l.endTime : ''}`, l.location, detail.address, detail.priceText, l.complet ? 'COMPLET' : ''].filter(Boolean).join(' | ')).slice(0, 1200)
+      });
+    }));
+    events.push(...parsed);
+  }
+  return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -3327,7 +3500,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
@@ -3626,6 +3799,50 @@ function runFixtureTests() {
   assert.strictEqual(laSaugeEvent.startDate, '2026-07-04T13:00:00+02:00', 'La Sauge should apply the DST-aware start time');
   assert.strictEqual(laSaugeEvent.city, 'Cudrefin');
   assert(laSaugeEvent.tags.includes('nature'), 'La Sauge event should be tagged nature');
+  // --- Parc naturel régional Jura vaudois -----------------------------------
+  assert.deepStrictEqual(parseParcJuraVaudoisDate('10.07'), { startDay: '10', startMonth: '07', endDay: null, endMonth: null }, 'Parc Jura single date');
+  assert.deepStrictEqual(parseParcJuraVaudoisDate('18-19.07'), { startDay: '18', startMonth: '07', endDay: '19', endMonth: '07' }, 'Parc Jura same-month range');
+  assert.deepStrictEqual(parseParcJuraVaudoisTime('09:15 ><br> 15:00'), { startTime: '09:15', endTime: '15:00' }, 'Parc Jura time range');
+  const pjvListings = extractParcJuraVaudoisListings(
+    '<div id="posts-list" class="row mozaic">'
+    + '<div class="col-md-6 col-lg-4"><a href="https://parcjuravaudois.ch/fr/loisir/52168" title="Immersion nature" class="mozaic-link">'
+    + '<div class="image-mozaic"></div><div class="text"><div class="mozaic-info">'
+    + '<span class="date">18.07</span><span class="time">09:15 ><br>15:00</span><span class="location">Saint Cergue</span>'
+    + '</div><h3>Immersion nature</h3></div></a></div>'
+    + '<div class="col-md-6 col-lg-4"><a href="https://parcjuravaudois.ch/fr/loisir/52215" title="Traces et indices" class="mozaic-link">'
+    + '<div class="image-mozaic"></div><div class="text"><div class="mozaic-info">'
+    + '<span class="date">23.01</span><span class="time">09:00 ><br>12:00</span><span class="location">Saint Cergue</span>'
+    + '</div><h3>NOUVEAU - Traces et indices</h3></div></a></div>'
+    + '</div>'
+  );
+  assert.strictEqual(pjvListings.length, 2, 'Parc Jura should extract both cards');
+  assert.strictEqual(pjvListings[0].id, '52168');
+  assert.strictEqual(pjvListings[0].title, 'Immersion nature');
+  assert.strictEqual(pjvListings[1].title, 'Traces et indices', 'Parc Jura should strip the NOUVEAU prefix');
+  const pjvDated = assignParcJuraVaudoisYears(pjvListings, new Date('2026-07-04T07:00:00Z'));
+  assert.strictEqual(pjvDated[0].startDate, '2026-07-18');
+  assert.strictEqual(pjvDated[1].startDate, '2027-01-23', 'Parc Jura should roll the year forward on the Dec→Jan wrap');
+  const pjvDetail = parseParcJuraVaudoisDetail(
+    '<div class="activite_description activite_block">Vivez une aventure hors du temps: bivouac en nature et cueillette de plantes sauvages comestibles.</div>'
+    + '<div class="activite_details activite_block"><h2>Lieu de rendez-vous</h2><p>Col de la Givrine<br>1264 Saint Cergue</p></div>'
+    + '<div class="activite_prix activite_block"><h2>Prix</h2><p>Adulte : 120 CHF<br />Enfant : 60 CHF</p></div>',
+    pjvListings[0]
+  );
+  assert.strictEqual(pjvDetail.city, 'Saint Cergue', 'Parc Jura should read the town from the NPA line');
+  assert.strictEqual(pjvDetail.childPrice, 60, 'Parc Jura should read the child tariff');
+  assert(pjvDetail.familyLike, 'Parc Jura event with a child tariff should be flagged family-like');
+  const pjvEvent = normalizeEvent({
+    source: 'parcJuraVaudois', title: pjvListings[0].title,
+    startDate: isoDateZurich(pjvDated[0].startDate, pjvListings[0].startTime), endDate: null,
+    locationName: 'Col de la Givrine', locationText: 'Col de la Givrine, 1264 Saint Cergue · Saint Cergue', city: pjvDetail.city,
+    url: pjvListings[0].url, description: pjvDetail.description,
+    ageText: `famille (tarif enfant ${pjvDetail.childPrice} CHF)`, priceText: pjvDetail.priceText,
+    tags: inferTags(`${pjvListings[0].title} ${pjvDetail.description} nature plein air Jura`),
+    officialSources: [pjvListings[0].url]
+  });
+  assert.strictEqual(pjvEvent.startDate, '2026-07-18T09:15:00+02:00', 'Parc Jura should apply the DST-aware start time');
+  assert(pjvEvent.officialSources.some(u => /\/loisir\/52168/.test(u)), 'Parc Jura should keep the stable detail URL');
+  assert.strictEqual(estimateDistanceKm(pjvEvent), 60, 'Parc Jura Saint-Cergue should resolve a distance from Yverdon');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -3720,4 +3937,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois };
