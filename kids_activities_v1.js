@@ -69,6 +69,22 @@ const LOCATION_KM_FROM_YVERDON = {
   givrine: 62,
   'la givrine': 62,
   payerne: 25,
+  'corcelles-pres-payerne': 27,
+  'corcelles-près-payerne': 27,
+  // Office des Vins Vaudois agenda — vignoble vaudois (Côtes de l'Orbe / Bonvillars
+  // proches d'Yverdon, Lavaux / La Côte / Chablais plus lointains).
+  bonvillars: 8,
+  villeneuve: 62,
+  yens: 40,
+  vullierens: 42,
+  epesses: 52,
+  fechy: 42,
+  'féchy': 42,
+  begnins: 55,
+  'saint-prex': 52,
+  cully: 50,
+  rolle: 50,
+  riex: 51,
   'estavayer-le-lac': 22,
   estavayer: 22,
   'praz (vully)': 35,
@@ -89,6 +105,15 @@ const SOURCES = {
   yverdon: {
     url: 'https://yverdonlesbainsregion.ch/agenda/',
     kind: 'tourism-agenda'
+  },
+  ovv: {
+    url: 'https://www.ovv.ch/agenda',
+    baseUrl: 'https://www.ovv.ch',
+    // Office des Vins Vaudois — agenda du vignoble vaudois (caves ouvertes, bars à
+    // vins, balades gourmandes, portes ouvertes, fêtes du terroir). Fit fort avec le
+    // signal La Dérivée / terroir / familles; couvre les 6 régions AOC dont les Côtes
+    // de l'Orbe / Bonvillars, proches d'Yverdon.
+    kind: 'wine-region-terroir-agenda'
   },
   emoi: {
     url: 'https://www.emoi.ch/agenda-culturel',
@@ -3454,6 +3479,155 @@ async function scrapeParcJuraVaudois() {
   return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
 }
 
+// --- Office des Vins Vaudois (OVV) — agenda du vignoble vaudois ---
+// Static Drupal listing: one `a.teaser-event` card per event with a `.date` cell
+// (single date or `d1 month1 — d2 month2 year` range, plus an optional time/schedule
+// line after the first <br>), an `<h3>` title, a `.domain` (winery/organizer) and a
+// `.address` (street + NPA + city). Detail pages add a `.lead` description and an
+// official Website link. Listing-level extraction is sufficient; detail is enrichment.
+function fetchOvvHtml(url, timeoutMs = 30000) {
+  const maxTime = Math.max(5, Math.ceil(timeoutMs / 1000));
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+}
+
+// Parse an OVV `.date` cell. The first line is the date; text after the first <br>
+// is a schedule/time line. Handles single dates ("23 novembre 2026") and ranges
+// ("20 août — 3 septembre 2026" / "20 août — 22 août 2026"), where the year at the
+// end applies to both bounds and the first month may be implicit only when repeated.
+function parseOvvListingDate(dateCell) {
+  const raw = clean(String(dateCell || '').replace(/<br\s*\/?>(?![\s\S]*<br)/i, '\u0001').replace(/<br\s*\/?>/gi, '\u0001'));
+  const firstLine = raw.split('\u0001')[0] || raw;
+  const timeLine = raw.split('\u0001').slice(1).join(' ').trim();
+  const t = clean(firstLine).toLowerCase();
+  // Range: "<d1> <m1?> — <d2> <m2> <year>"
+  const range = t.match(new RegExp(`^(\\d{1,2})\\s*(?:(${MONTH_RE})\\.?)?\\s*[—–-]\\s*(\\d{1,2})\\s+(${MONTH_RE})\\.?(?:\\s+(\\d{4}))?`, 'i'));
+  if (range) {
+    const year = range[5] || String(new Date().getFullYear());
+    const endMonth = MONTHS[range[4]];
+    const startMonth = MONTHS[range[2] || range[4]];
+    if (!startMonth || !endMonth) return null;
+    const startDate = `${year}-${startMonth}-${range[1].padStart(2, '0')}`;
+    const endDate = `${year}-${endMonth}-${range[3].padStart(2, '0')}`;
+    return { startDate, endDate: endDate === startDate ? null : endDate, timeLine, dateText: clean(firstLine) };
+  }
+  const single = parseFrenchDate(firstLine);
+  if (!single) return null;
+  return { startDate: single, endDate: null, timeLine, dateText: clean(firstLine) };
+}
+
+// Extract a start time from an OVV schedule line. Returns '' for recurring/ambiguous
+// lines ("Tous les samedis de 10h à 13h") so those stay date-level rather than binding
+// a misleading time. Handles "16h30 à 20h", "De 9h00 à 12h30", "18h-22h", "18h30".
+function parseOvvTime(timeLine) {
+  const t = clean(String(timeLine || ''));
+  if (!t) return '';
+  if (/tous les|chaque|sur (?:rendez|réservation)|horaires? variables|arriv[ée]e libre/i.test(t)) {
+    // still allow an explicit "entre 17h et 20h" start
+    const between = t.match(/entre\s+(\d{1,2})\s*h\s*(\d{2})?/i);
+    if (between) return `${between[1].padStart(2, '0')}:${(between[2] || '00').padStart(2, '0')}`;
+    return '';
+  }
+  const m = t.match(/(\d{1,2})\s*h\s*(\d{2})?/i) || t.match(/(\d{1,2})\s*:\s*(\d{2})/);
+  if (!m) return '';
+  const hour = Number(m[1]);
+  if (hour > 23) return '';
+  return `${String(hour).padStart(2, '0')}:${(m[2] || '00').padStart(2, '0')}`;
+}
+
+// City from an OVV address ("Rue de Genève 97 B 1004 Lausanne" -> "Lausanne").
+function ovvCityFromAddress(address) {
+  const m = clean(String(address || '')).match(/(?<!\d)\d{4}\s+([A-Za-zÀ-ÿ'’()\- ]+?)\s*$/);
+  return m ? clean(m[1]) : '';
+}
+
+function extractOvvListings(html, baseUrl = SOURCES.ovv.baseUrl) {
+  const $ = cheerio.load(html);
+  const items = [];
+  $('a.teaser-event').each((_, a) => {
+    const $a = $(a);
+    const href = $a.attr('href') || '';
+    if (!/\/agenda\//.test(href)) return;
+    const dateHtml = $a.find('.date').first().html() || '';
+    const parsed = parseOvvListingDate(dateHtml);
+    if (!parsed) return;
+    const title = clean($a.find('h3').first().text());
+    if (!title) return;
+    const domain = clean($a.find('.domain').first().text());
+    const address = clean($a.find('.address').first().text());
+    items.push({
+      url: canonicalUrl(href, baseUrl) || `${baseUrl}${href}`,
+      title, domain, address,
+      city: ovvCityFromAddress(address),
+      startDate: parsed.startDate, endDate: parsed.endDate,
+      startTime: parseOvvTime(parsed.timeLine),
+      dateText: parsed.dateText, timeLine: clean(parsed.timeLine)
+    });
+  });
+  // Dedupe by canonical URL (some cards repeat across listing sections).
+  return uniqBy(items, i => i.url);
+}
+
+// Enrich from the detail page: `.lead` description + an official external Website link.
+function parseOvvDetail(html) {
+  const $ = cheerio.load(html);
+  const description = clean($('.lead').first().text());
+  let website = '';
+  $('.contact-infos a[href], a[href]').each((_, a) => {
+    if (website) return;
+    const label = clean($(a).closest('p').find('.label').first().text());
+    const href = $(a).attr('href') || '';
+    if (/website|site/i.test(label) && /^https?:/i.test(href)) website = href;
+  });
+  return { description, website };
+}
+
+async function scrapeOvv() {
+  let html;
+  try {
+    html = fetchOvvHtml(SOURCES.ovv.url, 30000);
+  } catch (e) {
+    return [{ source: 'ovv', title: 'Office des Vins Vaudois — agenda', url: SOURCES.ovv.url, error: e.message }];
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const listings = extractOvvListings(html)
+    .filter(l => ((l.endDate || l.startDate) || '').slice(0, 10) >= today);
+  const events = [];
+  const batchSize = 8;
+  for (let i = 0; i < listings.length; i += batchSize) {
+    const batch = listings.slice(i, i + batchSize);
+    const parsed = await Promise.all(batch.map(async (l) => {
+      let detail = { description: '', website: '' };
+      try { detail = parseOvvDetail(await fetchHtml(l.url, 15000)); } catch { /* listing-level fallback */ }
+      const hay = `${l.title} ${l.domain} ${detail.description} ${l.timeLine}`;
+      const free = /gratuit\w*|entr[ée]e libre|libre acc[èe]s/i.test(hay);
+      const priceText = free ? (hay.match(/gratuit\w*|entr[ée]e libre|libre acc[èe]s/i) || [''])[0] : '';
+      // Caves ouvertes / fêtes / balades / marchés are family-compatible terroir outings;
+      // pure adult tastings ("bar à vins", "dégustation") are kept but not flagged famille.
+      const familyLike = /caves? ouvertes|f[êe]te|festival|balade|march[ée]|portes ouvertes|vendanges|guinguette|terroir en f[êe]te|famille|enfants?/i.test(hay)
+        && !/^bar à vins/i.test(l.title);
+      const locationText = clean([l.domain, l.address].filter(Boolean).join(' · ')) || l.address || 'Vignoble vaudois';
+      const officialSources = uniqBy([l.url, detail.website].filter(h => /^https?:/i.test(h)).map(h => canonicalUrl(h, SOURCES.ovv.baseUrl)).filter(Boolean), x => x);
+      return normalizeEvent({
+        source: 'ovv', title: l.title,
+        startDate: isoDateZurich(l.startDate, l.startTime), endDate: l.endDate,
+        locationName: l.domain || (l.city ? `Vignoble vaudois — ${l.city}` : 'Vignoble vaudois'),
+        locationText,
+        city: l.city,
+        url: l.url,
+        description: detail.description || l.title,
+        ageText: familyLike ? 'tout public / famille (terroir)' : '',
+        priceText: clean(priceText),
+        tags: inferTags(`${hay} vin vignoble terroir cave dégustation ${familyLike ? 'famille plein air' : ''} Vaud`),
+        sourceProvenance: `Office des Vins Vaudois — agenda: ${l.url} (${l.dateText}${l.timeLine ? ' / ' + l.timeLine : ''})`,
+        officialSources,
+        evidence: clean([l.dateText, l.startDate, l.endDate && `→ ${l.endDate}`, l.timeLine, l.domain, l.address, priceText].filter(Boolean).join(' | ')).slice(0, 1200)
+      });
+    }));
+    events.push(...parsed);
+  }
+  return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -3500,7 +3674,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
@@ -3843,6 +4017,49 @@ function runFixtureTests() {
   assert.strictEqual(pjvEvent.startDate, '2026-07-18T09:15:00+02:00', 'Parc Jura should apply the DST-aware start time');
   assert(pjvEvent.officialSources.some(u => /\/loisir\/52168/.test(u)), 'Parc Jura should keep the stable detail URL');
   assert.strictEqual(estimateDistanceKm(pjvEvent), 60, 'Parc Jura Saint-Cergue should resolve a distance from Yverdon');
+  // --- OVV (Office des Vins Vaudois) agenda ---
+  assert.deepStrictEqual(
+    (({ startDate, endDate, timeLine }) => ({ startDate, endDate, timeLine }))(parseOvvListingDate('23 novembre 2026<br> 16h30 à 20h')),
+    { startDate: '2026-11-23', endDate: null, timeLine: '16h30 à 20h' }, 'OVV single date + time line');
+  assert.deepStrictEqual(
+    (({ startDate, endDate }) => ({ startDate, endDate }))(parseOvvListingDate('20 août — 3 septembre 2026<br> 18h-22h')),
+    { startDate: '2026-08-20', endDate: '2026-09-03' }, 'OVV cross-month range with year applied to both bounds');
+  assert.deepStrictEqual(
+    (({ startDate, endDate }) => ({ startDate, endDate }))(parseOvvListingDate('20 août — 22 août 2026<br>')),
+    { startDate: '2026-08-20', endDate: '2026-08-22' }, 'OVV same-month range');
+  assert.strictEqual(parseOvvTime('16h30 à 20h'), '16:30', 'OVV should read a start time');
+  assert.strictEqual(parseOvvTime('De 9h00 à 12h30'), '09:00', 'OVV should read a "De 9h00" start time');
+  assert.strictEqual(parseOvvTime('Tous les samedis de 10h à 13h'), '', 'OVV recurring line should stay date-level');
+  assert.strictEqual(parseOvvTime('arrivée libre entre 17h et 20h.'), '17:00', 'OVV should read an "entre 17h" start time');
+  assert.strictEqual(ovvCityFromAddress('Rue de Genève 97 B 1004 Lausanne'), 'Lausanne', 'OVV should read the town from the NPA line');
+  const ovvListings = extractOvvListings(
+    '<div class="list-teaser-event"><a href="/agenda/caves-ouvertes-bonvillars" class="teaser-event">'
+    + '<div class="date">30 mai 2026<br> 10h à 18h</div>'
+    + '<div class="infos"><h3>Caves ouvertes à Bonvillars</h3><p class="domain">Cave des Vignerons</p>'
+    + '<p class="address mt-1 mb-0">Rue du Four 3 1427 Bonvillars</p></div></a></div>'
+    + '<div class="list-teaser-event"><a href="/agenda/bar-vins-au-36-141" class="teaser-event">'
+    + '<div class="date">26 novembre 2026<br> 16h30 à 20h</div>'
+    + '<div class="infos"><h3>Bar à vins "Au 36"</h3><p class="domain">Domaine Bertholet</p>'
+    + '<p class="address mt-1 mb-0">Grand Rue 36 1844 Villeneuve</p></div></a></div>',
+    SOURCES.ovv.baseUrl);
+  assert.strictEqual(ovvListings.length, 2, 'OVV should extract both teaser cards');
+  assert.strictEqual(ovvListings[0].city, 'Bonvillars', 'OVV should extract the city');
+  assert.strictEqual(ovvListings[0].startTime, '10:00', 'OVV should extract the listing start time');
+  assert(ovvListings[0].url.endsWith('/agenda/caves-ouvertes-bonvillars'), 'OVV should keep the stable detail URL');
+  const ovvDetail = parseOvvDetail('<div class="col-md-8"><p class="lead my-3">Portes ouvertes des caves, dégustation et ambiance familiale au cœur du vignoble.</p><div class="contact-infos"><p><span class="label">E-mail</span><a href="mailto:info@x.ch">info@x.ch</a></p><p><span class="label">Website</span><a href="https://cavesbonvillars.ch">cavesbonvillars.ch</a></p></div></div>');
+  assert(/famille|dégustation/i.test(ovvDetail.description), 'OVV detail should read the lead description');
+  assert.strictEqual(ovvDetail.website, 'https://cavesbonvillars.ch', 'OVV detail should read the official website link');
+  const ovvEvent = normalizeEvent({
+    source: 'ovv', title: ovvListings[0].title,
+    startDate: isoDateZurich(ovvListings[0].startDate, ovvListings[0].startTime), endDate: ovvListings[0].endDate,
+    locationName: ovvListings[0].domain, locationText: `${ovvListings[0].domain} · ${ovvListings[0].address}`, city: ovvListings[0].city,
+    url: ovvListings[0].url, description: ovvDetail.description, ageText: 'tout public / famille (terroir)', priceText: '',
+    tags: inferTags(`${ovvListings[0].title} vin vignoble terroir cave famille plein air`),
+    officialSources: [ovvListings[0].url, ovvDetail.website]
+  });
+  assert.strictEqual(ovvEvent.startDate, '2026-05-30T10:00:00+02:00', 'OVV should apply the DST-aware start time');
+  assert.strictEqual(estimateDistanceKm(ovvEvent), 8, 'OVV Bonvillars should resolve a short distance from Yverdon');
+  assert(ovvEvent.officialSources.some(u => /cavesbonvillars\.ch/.test(u)), 'OVV should keep the official website in sources');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -3937,4 +4154,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv };
