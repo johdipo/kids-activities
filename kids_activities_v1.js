@@ -323,6 +323,25 @@ const SOURCES = {
     baseUrl: 'https://parcjuravaudois.ch',
     kind: 'regional-nature-park-family-activities-agenda'
   },
+  champPittet: {
+    // Centre Pro Natura de Champ-Pittet (Cheseaux-Noréaz, 5 km d'Yverdon), le grand
+    // centre nature famille au bord de la Grande Cariçaie / lac de Neuchâtel: ateliers
+    // enfants, sentiers découverte, expos (intérieures & extérieures), bibliothèque
+    // mobile, bain de forêt, Fête des familles. Fort ancrage La Dérivée / plein-air /
+    // nature / lac / famille. Distinct des sources existantes: `emoi` ne surface qu'un
+    // sous-ensemble Geocity de Champ-Pittet, `laSauge` est l'autre centre nature (rive
+    // NE, Cudrefin); ce site officiel expose l'agenda complet de Champ-Pittet.
+    // Plateforme: listing Drupal `.cards__wrapper a.card` (une carte par événement:
+    // `.card__date` start/end + `.card__title` + `.card__tags` catégorie), paginé via
+    // `?page=N` ("Les entrées a-b de N sont affichées"). Chaque carte lie une page de
+    // détail `/fr/<slug>` qui embarque un schema.org Event (JSON-LD name/description +
+    // offers) et un champ visible "Heure HH:MM - HH:MM" en heure LOCALE (les dates
+    // JSON-LD sont en UTC, à ne pas utiliser telles quelles). Les dates de la carte
+    // (query-string startDate/endDate DD.MM.YYYY) sont numériques et sans ambiguïté.
+    url: 'https://www.pronatura-champ-pittet.ch/fr/agenda',
+    baseUrl: 'https://www.pronatura-champ-pittet.ch',
+    kind: 'nature-center-pronatura-lakeside-family-agenda'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -3628,6 +3647,133 @@ async function scrapeOvv() {
   return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
 }
 
+// --- Centre Pro Natura de Champ-Pittet (Cheseaux-Noréaz, Grande Cariçaie) ------
+// Drupal listing; use a curl-backed fetch for the same reliability the other CMS
+// sources rely on.
+function fetchChampPittetHtml(url, timeoutMs = 30000) {
+  const maxTime = Math.max(5, Math.ceil(timeoutMs / 1000));
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
+}
+
+// Convert a DD.MM.YYYY card query-string date to YYYY-MM-DD (numeric, unambiguous).
+function champPittetIsoDate(text) {
+  const m = clean(text).match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if (!m) return null;
+  const day = m[1].padStart(2, '0'), month = m[2].padStart(2, '0');
+  if (Number(month) < 1 || Number(month) > 12 || Number(day) < 1 || Number(day) > 31) return null;
+  return `${m[3]}-${month}-${day}`;
+}
+
+// Extract the event cards from the /fr/agenda listing. Each `.cards__wrapper a.card`
+// links a stable /fr/<slug> detail page and carries its date range in the href
+// query-string (startDate/endDate DD.MM.YYYY). Titles use soft hyphens + &nbsp;,
+// which are stripped here (the detail JSON-LD name is preferred later anyway).
+function extractChampPittetListings(html, baseUrl = SOURCES.champPittet.baseUrl) {
+  const $ = cheerio.load(html);
+  const items = [];
+  $('.cards__wrapper a.card').each((_, a) => {
+    const $a = $(a);
+    const href = $a.attr('href') || '';
+    const slugMatch = href.match(/^(\/fr\/[^?#]+)/);
+    if (!slugMatch) return;
+    const q = href.match(/startDate=([\d.]+)[^]*?endDate=([\d.]+)/);
+    const startDate = q ? champPittetIsoDate(q[1]) : null;
+    let endDate = q ? champPittetIsoDate(q[2]) : null;
+    if (!startDate) return;
+    if (endDate === startDate) endDate = null;
+    const title = clean($a.find('.card__title').first().text().replace(/\u00AD/g, '').replace(/\u00A0/g, ' '));
+    if (!title) return;
+    const category = clean($a.find('.card__tags').first().text());
+    items.push({
+      url: canonicalUrl(slugMatch[1], baseUrl) || `${baseUrl}${slugMatch[1]}`,
+      slug: slugMatch[1], startDate, endDate, title, category
+    });
+  });
+  return uniqBy(items, x => x.url);
+}
+
+// Enrich a card from its /fr/<slug> detail page: schema.org Event name/description,
+// the visible local "Heure HH:MM - HH:MM" (`.hero__cta__time .cta-value`), price
+// ("Coûts") and the location name. The JSON-LD start/end datetimes are UTC and are
+// intentionally NOT used for the time-of-day — the visible Heure field is local.
+function parseChampPittetDetail(html, listing) {
+  const $ = cheerio.load(html);
+  let name = '', description = '';
+  const ld = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+  if (ld) {
+    try {
+      const graph = JSON.parse(ld[1])['@graph'] || [];
+      const ev = graph.find(g => g['@type'] === 'Event');
+      if (ev) { name = clean(ev.name || ''); description = clean(ev.description || ''); }
+    } catch { /* fall back to the listing title */ }
+  }
+  const timeVal = clean($('.hero__cta__time .cta-value').first().text());
+  const timeM = timeVal.match(/(\d{1,2}:\d{2})(?:\s*[-–]\s*(\d{1,2}:\d{2}))?/);
+  const startTime = timeM ? timeM[1] : '';
+  const endTime = timeM ? (timeM[2] || '') : '';
+  const priceRaw = clean($('.field--name-field-price .field__item').first().text());
+  const locationName = clean($('.field--name-field-location-name .field__item').first().text()) || (listing && listing.locationName) || 'Centre Pro Natura de Champ-Pittet';
+  const hay = `${priceRaw} ${description}`;
+  const free = /gratuit|entr[ée]e libre|offert/i.test(hay);
+  const priceText = free ? (hay.match(/gratuit\w*|entr[ée]e libre|offert/i) || [''])[0] : priceRaw;
+  return { name, description, startTime, endTime, priceText: clean(priceText), locationName };
+}
+
+async function scrapeChampPittet() {
+  const base = SOURCES.champPittet.url;
+  let listings = [];
+  try {
+    const first = fetchChampPittetHtml(base, 25000);
+    listings = extractChampPittetListings(first);
+    const totalM = clean(cheerio.load(first)('body').text()).match(/de\s+(\d+)\s+sont affich/i);
+    const total = totalM ? Number(totalM[1]) : listings.length;
+    for (let page = 1; listings.length < total && page < 8; page++) {
+      const more = extractChampPittetListings(fetchChampPittetHtml(`${base}?page=${page}`, 25000));
+      if (!more.length) break;
+      listings = uniqBy([...listings, ...more], x => x.url);
+    }
+  } catch (e) {
+    return [{ source: 'champPittet', title: 'Centre Pro Natura de Champ-Pittet — agenda', url: base, error: e.message }];
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  listings = listings.filter(l => ((l.endDate || l.startDate) || '').slice(0, 10) >= today);
+  const venue = 'Centre Pro Natura de Champ-Pittet';
+  const events = [];
+  const batchSize = 6;
+  for (let i = 0; i < listings.length; i += batchSize) {
+    const batch = listings.slice(i, i + batchSize);
+    const parsed = batch.map((l) => {
+      let detail = { name: '', description: '', startTime: '', endTime: '', priceText: '', locationName: venue };
+      try { detail = parseChampPittetDetail(fetchChampPittetHtml(l.url, 15000), l); } catch { /* listing-level fallback */ }
+      const title = detail.name || l.title;
+      // Single-day activities carry a local "Heure HH:MM - HH:MM"; multi-day expos
+      // (ongoing) stay date-level.
+      const multiDay = !!l.endDate;
+      const startDate = multiDay ? l.startDate : isoDateZurich(l.startDate, detail.startTime);
+      const endDate = multiDay ? l.endDate : (detail.endTime ? isoDateZurich(l.startDate, detail.endTime) : null);
+      const hay = `${title} ${detail.description} ${l.category}`;
+      const familyLike = /famille|enfants?|atelier|bricolage|sentier|expo|nature|for[êe]t|jardin|abeille|conte|d[ée]couverte|bibliothèque|bain de for[êe]t|tout public/i.test(hay);
+      return normalizeEvent({
+        source: 'champPittet', title,
+        startDate, endDate,
+        locationName: detail.locationName || venue,
+        locationText: `${detail.locationName || venue}, Cheseaux-Noréaz`,
+        city: 'Cheseaux-Noréaz',
+        url: l.url,
+        description: detail.description || title,
+        ageText: familyLike ? 'tout public / famille' : '',
+        priceText: detail.priceText,
+        tags: inferTags(`${hay} ${l.category} nature Grande Cariçaie lac roselière plein air famille Champ-Pittet Cheseaux-Noréaz`),
+        sourceProvenance: `Centre Pro Natura de Champ-Pittet — agenda: ${l.url}${l.category ? ` (${l.category})` : ''}`,
+        officialSources: [l.url],
+        evidence: clean([l.category, l.startDate, l.endDate && `→ ${l.endDate}`, detail.startTime && `${detail.startTime}${detail.endTime ? `-${detail.endTime}` : ''}`, detail.priceText, detail.description].filter(Boolean).join(' | ')).slice(0, 1200)
+      });
+    });
+    events.push(...parsed);
+  }
+  return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -3674,7 +3820,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
@@ -4060,6 +4206,54 @@ function runFixtureTests() {
   assert.strictEqual(ovvEvent.startDate, '2026-05-30T10:00:00+02:00', 'OVV should apply the DST-aware start time');
   assert.strictEqual(estimateDistanceKm(ovvEvent), 8, 'OVV Bonvillars should resolve a short distance from Yverdon');
   assert(ovvEvent.officialSources.some(u => /cavesbonvillars\.ch/.test(u)), 'OVV should keep the official website in sources');
+  // --- Centre Pro Natura de Champ-Pittet agenda ---
+  assert.strictEqual(champPittetIsoDate('12.08.2026'), '2026-08-12', 'Champ-Pittet should convert a DD.MM.YYYY card date');
+  assert.strictEqual(champPittetIsoDate('01.11.2026'), '2026-11-01', 'Champ-Pittet should zero-pad the card date');
+  const cpListings = extractChampPittetListings(
+    '<div class="cards__wrapper">'
+    + '<div class="cards__content"><a href="/fr/atelier-bricolage-pour-enfants?startDate=12.08.2026&amp;endDate=12.08.2026" class="card card--small card--image">'
+    + '<div class="card__date"><div class="start-date"><div class="day">12</div><div class="month">Aoû</div><div class="year">2026</div></div></div>'
+    + '<div class="card__body"><h2 class="card__title">Atelier bricolage pour enfants</h2></div>'
+    + '<div class="card__footer"><div class="card__tags"><i><svg></svg></i> Atelier</div></div></a></div>'
+    + '<div class="cards__content"><a href="/fr/exposition-interactive-et-ludique?startDate=28.03.2026&amp;endDate=01.11.2026" class="card card--small card--image">'
+    + '<div class="card__date"><div class="start-date"><div class="day">28</div><div class="month">Mar</div><div class="year">2026</div></div><div class="separator">-</div><div class="end-date"><div class="day">01</div><div class="month">Nov</div><div class="year">2026</div></div></div>'
+    + '<div class="card__body"><h2 class="card__title">Expo­si­tion inter­active et ludique — Qui vit là ?</h2></div>'
+    + '<div class="card__footer"><div class="card__tags"><i><svg></svg></i> Exposition</div></div></a></div>'
+    + '</div>',
+    SOURCES.champPittet.baseUrl);
+  assert.strictEqual(cpListings.length, 2, 'Champ-Pittet should extract both cards');
+  assert.strictEqual(cpListings[0].startDate, '2026-08-12');
+  assert.strictEqual(cpListings[0].endDate, null, 'Champ-Pittet single-day card should collapse the end date');
+  assert.strictEqual(cpListings[0].category, 'Atelier');
+  assert.strictEqual(cpListings[1].startDate, '2026-03-28');
+  assert.strictEqual(cpListings[1].endDate, '2026-11-01', 'Champ-Pittet multi-day expo should keep the end date');
+  assert.strictEqual(cpListings[1].title, 'Exposition interactive et ludique — Qui vit là ?', 'Champ-Pittet should strip soft hyphens and nbsp from the title');
+  assert(cpListings[1].url.endsWith('/fr/exposition-interactive-et-ludique'), 'Champ-Pittet should keep the stable slug URL');
+  const cpDetail = parseChampPittetDetail(
+    '<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Event","name":"Atelier bricolage pour enfants","description":"Participe à notre atelier bricolage et construis un palace pour les abeilles sauvages !","startDate":"2026-08-12T12:00:00","endDate":"2026-08-12T14:00:00"}]}</script>'
+    + '<div class="hero__cta__time"><div class="cta-label">Heure</div><div class="cta-value">14:00 - 16:00</div></div>'
+    + '<div class="field field--name-field-price"><div class="field__label">Coûts</div><div class="field__item">A partir de CHF 10.00</div></div>'
+    + '<div class="field field--name-field-location-name"><div class="field__label">Lieu</div><div class="field__item">Centre Pro Natura de Champ-Pittet</div></div>',
+    cpListings[0]);
+  assert.strictEqual(cpDetail.name, 'Atelier bricolage pour enfants', 'Champ-Pittet should read the JSON-LD Event name');
+  assert.strictEqual(cpDetail.startTime, '14:00', 'Champ-Pittet should read the local start time (not the UTC JSON-LD)');
+  assert.strictEqual(cpDetail.endTime, '16:00', 'Champ-Pittet should read the local end time');
+  assert.strictEqual(cpDetail.priceText, 'A partir de CHF 10.00', 'Champ-Pittet should read the Coûts price');
+  assert.strictEqual(cpDetail.locationName, 'Centre Pro Natura de Champ-Pittet', 'Champ-Pittet should read the location name');
+  const cpEvent = normalizeEvent({
+    source: 'champPittet', title: cpDetail.name || cpListings[0].title,
+    startDate: isoDateZurich(cpListings[0].startDate, cpDetail.startTime),
+    endDate: cpDetail.endTime ? isoDateZurich(cpListings[0].startDate, cpDetail.endTime) : null,
+    locationName: cpDetail.locationName, locationText: `${cpDetail.locationName}, Cheseaux-Noréaz`, city: 'Cheseaux-Noréaz',
+    url: cpListings[0].url, description: cpDetail.description,
+    ageText: 'tout public / famille', priceText: cpDetail.priceText,
+    tags: inferTags(`${cpDetail.name} ${cpDetail.description} nature Grande Cariçaie plein air famille`),
+    officialSources: [cpListings[0].url]
+  });
+  assert.strictEqual(cpEvent.startDate, '2026-08-12T14:00:00+02:00', 'Champ-Pittet should apply the DST-aware local start time');
+  assert.strictEqual(cpEvent.endDate, '2026-08-12T16:00:00+02:00', 'Champ-Pittet should apply the DST-aware local end time');
+  assert.strictEqual(cpEvent.city, 'Cheseaux-Noréaz');
+  assert.strictEqual(estimateDistanceKm(cpEvent), 5, 'Champ-Pittet (Cheseaux-Noréaz) should resolve a short distance from Yverdon');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -4154,4 +4348,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv };
