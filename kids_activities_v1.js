@@ -4338,7 +4338,14 @@ if (require.main === module) {
   // process never hangs forever. A loud non-zero exit (124) lets the cron's
   // failureAlert fire instead of a silent stall. Skipped for the fast fixture run.
   if (!process.argv.includes('--fixture-test')) {
-    const MAX_RUNTIME_MS = 600000; // 10 min — far above normal runtime (seconds)
+    // Sized from a measured run (2026-08-05): 29 sources at ~18s each when healthy,
+    // plus 4 that hang until the 90s per-source guard => ~895s for a full pass.
+    // The original 600s dated from a much smaller source list; the ~20 sources added
+    // in June 2026 pushed a full run past it, so every run since ~2026-07-18 aborted
+    // here before writing an artifact (17 consecutive failures, silent because the
+    // cron's alert was separately suppressed). Keep well under the cron's own 2700s
+    // timeout so this loud exit 124 stays ours and carries a useful message.
+    const MAX_RUNTIME_MS = 1800000; // 30 min
     const watchdog = setTimeout(() => {
       console.error(`Watchdog: run exceeded ${MAX_RUNTIME_MS / 1000}s, aborting (no artifact produced).`);
       process.exit(124);
