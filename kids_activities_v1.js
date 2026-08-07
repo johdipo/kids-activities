@@ -93,6 +93,10 @@ const LOCATION_KM_FROM_YVERDON = {
   morges: 48,
   neuchatel: 39,
   neuchâtel: 39,
+  // Buskers Festival de Neuchâtel: rue/vieille ville de Neuchâtel + volet
+  // dominical familial à La Ramée (plage/rive du lac), à Marin-Epagnier.
+  'marin-epagnier': 44,
+  marin: 44,
   fribourg: 55,
   geneve: 85,
   genève: 85
@@ -342,6 +346,23 @@ const SOURCES = {
     baseUrl: 'https://www.pronatura-champ-pittet.ch',
     kind: 'nature-center-pronatura-lakeside-family-agenda'
   },
+  buskers: {
+    // Buskers Festival de Neuchâtel (demandé par Johan 2026-08-06): le plus ancien
+    // festival de musique & arts de la rue de Suisse (depuis 1990), chaque été dans
+    // la vieille ville / zone piétonne de Neuchâtel — déambulation, cirque, concerts,
+    // modèle "chapeau"/soutien participatif (programme vendu CHF 10, spectacles de rue
+    // gratuits) → fort ancrage La Dérivée / plein-air / famille. Comprend un volet
+    // dominical familial à La Ramée (plage/rive du lac à Marin-Epagnier). La home
+    // WordPress/Elementor mélange plusieurs éditions (textes 2023/2025 résiduels), donc
+    // la source lit la page /programme/horaires/ qui porte l'édition courante DATÉE avec
+    // l'année ("Du mardi 11 au samedi 15 août 2026 …", "Dimanche 16 août à la Ramée à
+    // Marin de 11h00 à 18h00"). Les horaires par artiste ne sont pas en ligne (uniquement
+    // dans le programme papier payant), donc l'extraction reste au niveau festival:
+    // l'événement principal (rue de Neuchâtel, multi-jours) + la journée La Ramée.
+    url: 'https://www.buskersfestival.ch/programme/horaires/',
+    baseUrl: 'https://www.buskersfestival.ch',
+    kind: 'street-arts-festival-neuchatel-agenda'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -486,7 +507,7 @@ function parseAge(ageText, text = '') {
 
 function cityFromLocation(text, fallback = '') {
   const t = clean(text);
-  for (const c of ['Yverdon-les-Bains', 'Yverdon', 'Grandson', 'Concise', 'Lausanne', 'Sainte-Croix', 'Yvonand', 'Vallorbe', 'Orbe', 'Neuchâtel', 'Neuchatel', 'Cheseaux-Noréaz', 'Romainmôtier']) {
+  for (const c of ['Yverdon-les-Bains', 'Yverdon', 'Grandson', 'Concise', 'Lausanne', 'Sainte-Croix', 'Yvonand', 'Vallorbe', 'Orbe', 'Neuchâtel', 'Neuchatel', 'Cheseaux-Noréaz', 'Romainmôtier', 'Marin-Epagnier', 'Marin']) {
     if (new RegExp(c, 'i').test(t)) return c === 'Yverdon' ? 'Yverdon-les-Bains' : c;
   }
   return fallback;
@@ -3774,6 +3795,108 @@ async function scrapeChampPittet() {
   return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
 }
 
+// --- Buskers Festival de Neuchâtel (arts de la rue) ---------------------------
+// WordPress/Elementor site; the home page mixes leftover text from several past
+// editions, so use the /programme/horaires/ page which carries the current dated
+// edition. Node fetch works, but use a curl-backed fetch for the same reliability
+// the other CMS/WordPress sources rely on.
+function fetchBuskersHtml(url, maxTime = 25) {
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
+}
+
+// Parse the Buskers horaires page text into festival-level editions. Returns the
+// main street festival (a dated day-day month YEAR range in Neuchâtel's pedestrian
+// zone, starting "dès HHhMM") plus the family day at La Ramée in Marin. The main
+// range requires an explicit 4-digit year, which isolates the current edition from
+// the daily-schedule lines ("du 11 au 13 août: de 17h00 à 23h00") that have none.
+function parseBuskersEditions(text, fallbackYear = new Date().getFullYear()) {
+  const t = clean(text).replace(/&nbsp;/gi, ' ');
+  const out = [];
+  const dayName = 'lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche';
+
+  const rangeRe = new RegExp(`du\\s+(?:${dayName})?\\s*(\\d{1,2})\\s+au\\s+(?:${dayName})?\\s*(\\d{1,2})\\s+(${MONTH_RE})\\.?\\s+(\\d{4})`, 'i');
+  const r = t.match(rangeRe);
+  if (r) {
+    const month = MONTHS[r[3].toLowerCase().replace(/\.$/, '')];
+    const year = r[4];
+    // Start time: the first "dès HHhMM" that follows the dated range.
+    const after = t.slice(r.index + r[0].length, r.index + r[0].length + 160);
+    const tm = after.match(/d[èe]s\s+(\d{1,2})\s*h\s*(\d{2})?/i);
+    out.push({
+      kind: 'street',
+      startDate: `${year}-${month}-${String(r[1]).padStart(2, '0')}`,
+      endDate: `${year}-${month}-${String(r[2]).padStart(2, '0')}`,
+      startTime: tm ? `${tm[1]}h${tm[2] || '00'}` : '',
+      dateText: clean(r[0]),
+      year
+    });
+  }
+
+  // La Ramée family day: "Dimanche 16 août à la Ramée à Marin de 11h00 à 18h00".
+  const rameeRe = new RegExp(`(?:${dayName})?\\s*(\\d{1,2})\\s+(${MONTH_RE})\\.?\\s+[àa]\\s+la\\s+ram[ée]e[^.]*?\\bde\\s+(\\d{1,2})\\s*h\\s*(\\d{2})?\\s+[àa]\\s+(\\d{1,2})\\s*h\\s*(\\d{2})?`, 'i');
+  const rm = t.match(rameeRe);
+  if (rm) {
+    const month = MONTHS[rm[2].toLowerCase().replace(/\.$/, '')];
+    // The La Ramée line carries no year; inherit from the main range when present.
+    const year = (out[0] && out[0].year) || String(fallbackYear);
+    out.push({
+      kind: 'ramee',
+      startDate: `${year}-${month}-${String(rm[1]).padStart(2, '0')}`,
+      endDate: null,
+      startTime: `${rm[3]}h${rm[4] || '00'}`,
+      endTime: `${rm[5]}h${rm[6] || '00'}`,
+      dateText: clean(rm[0]),
+      year
+    });
+  }
+  return out;
+}
+
+async function scrapeBuskers() {
+  const html = fetchBuskersHtml(SOURCES.buskers.url);
+  const text = htmlToText(html);
+  const editions = parseBuskersEditions(text);
+  const today = new Date().toISOString().slice(0, 10);
+  const officialSources = [SOURCES.buskers.url, SOURCES.buskers.baseUrl + '/'];
+  const events = editions.map(ed => {
+    if (ed.kind === 'ramee') {
+      return normalizeEvent({
+        source: 'buskers',
+        title: 'Buskers Festival – La Ramée (journée famille au bord du lac)',
+        startDate: isoDateZurich(ed.startDate, ed.startTime), endDate: ed.endDate,
+        locationName: 'La Ramée',
+        locationText: 'La Ramée, Chem. de la Ramée 4, 2074 Marin-Epagnier',
+        city: 'Marin-Epagnier',
+        url: `${SOURCES.buskers.url}#${sha(`ramee|${ed.startDate}`)}`,
+        description: `Journée familiale de clôture du Buskers Festival à La Ramée (rive du lac, Marin-Epagnier), concerts et spectacles de rue de ${ed.startTime} à ${ed.endTime}. Ambiance plein-air/famille, accès participatif (chapeau).`,
+        ageText: 'tout public / famille',
+        priceText: 'Gratuit / chapeau (soutien)',
+        tags: inferTags('festival arts de la rue concert spectacle plein air lac famille gratuit chapeau La Ramée Marin'),
+        sourceProvenance: `Buskers Festival Neuchâtel – horaires: ${SOURCES.buskers.url} (${ed.dateText})`,
+        officialSources,
+        evidence: clean(`${ed.dateText} | ${ed.startDate} ${ed.startTime}-${ed.endTime} | La Ramée, Marin-Epagnier`).slice(0, 1200)
+      });
+    }
+    return normalizeEvent({
+      source: 'buskers',
+      title: `Buskers Festival Neuchâtel ${ed.year} (arts de la rue)`,
+      startDate: isoDateZurich(ed.startDate, ed.startTime), endDate: ed.endDate,
+      locationName: 'Vieille ville de Neuchâtel (zone piétonne)',
+      locationText: 'Vieille ville / zone piétonne, Neuchâtel',
+      city: 'Neuchâtel',
+      url: `${SOURCES.buskers.url}#${sha(`street|${ed.startDate}`)}`,
+      description: `Le plus ancien festival de musique et d'arts de la rue de Suisse (depuis 1990) : une vingtaine de compagnies déambulent dans la zone piétonne de Neuchâtel${ed.startTime ? `, dès ${ed.startTime}` : ''}. Spectacles de rue en accès libre (modèle chapeau/soutien, programme papier CHF 10), ambiance familiale et plein-air.`,
+      ageText: 'tout public / famille',
+      priceText: 'Spectacles de rue gratuits (chapeau) – programme CHF 10',
+      tags: inferTags('festival musique arts de la rue cirque concert spectacle déambulation plein air famille gratuit chapeau Neuchâtel'),
+      sourceProvenance: `Buskers Festival Neuchâtel – horaires: ${SOURCES.buskers.url} (${ed.dateText})`,
+      officialSources,
+      evidence: clean(`${ed.dateText} | ${ed.startDate} → ${ed.endDate} | Neuchâtel zone piétonne | dès ${ed.startTime || '17h00'}`).slice(0, 1200)
+    });
+  });
+  return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -3820,7 +3943,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
@@ -4254,6 +4377,27 @@ function runFixtureTests() {
   assert.strictEqual(cpEvent.endDate, '2026-08-12T16:00:00+02:00', 'Champ-Pittet should apply the DST-aware local end time');
   assert.strictEqual(cpEvent.city, 'Cheseaux-Noréaz');
   assert.strictEqual(estimateDistanceKm(cpEvent), 5, 'Champ-Pittet (Cheseaux-Noréaz) should resolve a short distance from Yverdon');
+  // Buskers Festival Neuchâtel: parse the dated current edition from the horaires text.
+  const buskersEditions = parseBuskersEditions('Du mardi 11 au samedi 15 août 2026 les artistes se produisent à Neuchâtel dans la rue, dans la zone piétonne dès 17h00. du 11 au 13 août: de 17h00 à 23h00. Les 14 et 15 août: de 17h00 à 01h00 Puis retrouvez les Nuits du Buskers dès 23h00 : Dimanche 16 août à la Ramée à Marin de 11h00 à 18h00. Adresse: Chem. de la Ramée 4, 2074 Marin-Epagnier');
+  assert.strictEqual(buskersEditions.length, 2, 'Buskers should parse the street festival + La Ramée day');
+  const buskersStreet = buskersEditions.find(e => e.kind === 'street');
+  assert.strictEqual(buskersStreet.startDate, '2026-08-11', 'Buskers street festival should start 11 août 2026 (year-anchored, not the daily-schedule line)');
+  assert.strictEqual(buskersStreet.endDate, '2026-08-15', 'Buskers street festival should end 15 août 2026');
+  assert.strictEqual(buskersStreet.startTime, '17h00', 'Buskers street festival should read the "dès 17h00" start');
+  const buskersRamee = buskersEditions.find(e => e.kind === 'ramee');
+  assert.strictEqual(buskersRamee.startDate, '2026-08-16', 'Buskers La Ramée day should be 16 août, inheriting the edition year');
+  assert.strictEqual(buskersRamee.startTime, '11h00');
+  assert.strictEqual(buskersRamee.endTime, '18h00');
+  const buskersRameeEvent = normalizeEvent({
+    source: 'buskers', title: 'Buskers Festival – La Ramée (journée famille au bord du lac)',
+    startDate: isoDateZurich(buskersRamee.startDate, buskersRamee.startTime), endDate: null,
+    locationName: 'La Ramée', locationText: 'La Ramée, Chem. de la Ramée 4, 2074 Marin-Epagnier', city: 'Marin-Epagnier',
+    url: `${SOURCES.buskers.url}#${sha(`ramee|${buskersRamee.startDate}`)}`,
+    ageText: 'tout public / famille', priceText: 'Gratuit / chapeau (soutien)',
+    tags: inferTags('festival arts de la rue plein air lac famille gratuit'), officialSources: [SOURCES.buskers.url]
+  });
+  assert.strictEqual(buskersRameeEvent.startDate, '2026-08-16T11:00:00+02:00', 'Buskers La Ramée should apply the DST-aware local start time');
+  assert.strictEqual(estimateDistanceKm(buskersRameeEvent), 44, 'La Ramée (Marin-Epagnier) should resolve a distance from Yverdon');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -4355,4 +4499,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers };
