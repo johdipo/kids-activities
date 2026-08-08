@@ -363,6 +363,23 @@ const SOURCES = {
     baseUrl: 'https://www.buskersfestival.ch',
     kind: 'street-arts-festival-neuchatel-agenda'
   },
+  castrum: {
+    // Le Castrum (demandé par Johan 2026-08-06): festival pluridisciplinaire
+    // d'Yverdon-les-Bains depuis 1979, chaque été au cœur historique (esplanade du
+    // Château / castrum romain, Place Pestalozzi) — arts de la scène, cirque, concerts,
+    // installations, ateliers, déambulations, DJ sets, **majoritairement gratuit** →
+    // excellent fit La Dérivée / plein-air / famille, en plein centre-ville d'Yverdon
+    // (donc 0 km). Le site est un front SvelteKit + back Payload: la page /programme
+    // expose un endpoint devalue `/programme/__data.json` propre — chaque événement
+    // porte titre, slug, catégorie, booking et une liste de sessions {location,
+    // startDate, endDate} en **UTC** (converties DST-aware vers Europe/Zurich). L'édition
+    // courante est datée par sa liste de sessions, donc quand une nouvelle édition est
+    // publiée la source la capte automatiquement (et retourne 0 event hors saison).
+    url: 'https://le-castrum.ch/programme/__data.json',
+    baseUrl: 'https://le-castrum.ch',
+    eventBase: 'https://le-castrum.ch/programme/',
+    kind: 'sveltekit-payload-festival-agenda-yverdon'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -3897,6 +3914,121 @@ async function scrapeBuskers() {
   return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
 }
 
+function fetchCastrumData(url, maxTime = 30) {
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 24 * 1024 * 1024 });
+}
+
+// Convert a Payload/CMS UTC ISO instant ("2026-08-08T19:00:00.000Z") to a DST-aware
+// Europe/Zurich ISO string. Le Castrum stores session start/end in UTC while the site
+// displays local wall-clock time (Fri 18:30Z → "vendredi 20h30" in August), so we must
+// shift, never take the Z time verbatim.
+function castrumUtcToZurichIso(iso) {
+  if (!iso) return null;
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return null;
+  return iwebTimestampToZurichIso(ms);
+}
+
+// Le Castrum's /programme is a SvelteKit route whose `__data.json` uses devalue's
+// flattened pool: every value (including strings/numbers) is stored once in a flat array
+// and referenced by its integer index; negative indices are devalue specials (undefined
+// etc.). `deref` follows one index into the pool; the extractor only walks the few fields
+// it needs (title, slug, category name, booking, sessions{location,startDate,endDate}),
+// deliberately never descending into the cyclic `edition`/`theme` graph.
+function derefCastrum(pool, idx) {
+  if (typeof idx !== 'number' || idx < 0) return null;
+  return pool[idx];
+}
+
+function extractCastrumListings(json, now = new Date()) {
+  const nodes = json && Array.isArray(json.nodes) ? json.nodes : [];
+  const node = nodes.find(n => n && n.type === 'data' && Array.isArray(n.data)
+    && n.data[0] && typeof n.data[0] === 'object' && 'events' in n.data[0]);
+  if (!node) return [];
+  const pool = node.data;
+  const D = i => derefCastrum(pool, i);
+  const eventsArr = D(pool[0].events);
+  if (!Array.isArray(eventsArr)) return [];
+  const todayIso = now.toISOString().slice(0, 10);
+  const rows = [];
+  for (const ei of eventsArr) {
+    const ev = D(ei);
+    if (!ev || typeof ev !== 'object') continue;
+    const title = clean(D(ev.title) || '');
+    const slug = clean(D(ev.slug) || '');
+    if (!title || !slug) continue;
+    const shortDescription = clean(D(ev.shortDescription) || '');
+    const info = D(ev.info) || {};
+    const catObj = D(info.category);
+    const category = catObj && typeof catObj === 'object' ? clean(D(catObj.name) || '') : '';
+    const booking = D(info.booking) === true;
+    const bookingLink = clean(D(info.bookingLink) || '');
+    const sessionsArr = D(info.sessions);
+    if (!Array.isArray(sessionsArr)) continue;
+    for (const si of sessionsArr) {
+      const s = D(si);
+      if (!s || typeof s !== 'object') continue;
+      const startIso = castrumUtcToZurichIso(D(s.startDate));
+      if (!startIso) continue;
+      const endIso = castrumUtcToZurichIso(D(s.endDate));
+      const locObj = D(s.location);
+      const locationName = locObj && typeof locObj === 'object' ? clean(D(locObj.name) || '') : '';
+      const startDay = startIso.slice(0, 10);
+      if (startDay < todayIso) continue;
+      const endDay = (endIso || '').slice(0, 10);
+      rows.push({
+        title, slug, shortDescription, category, booking, bookingLink,
+        locationName,
+        startDate: startIso,
+        // Keep endDate only for genuine multi-day items; same-day end times collapse to null.
+        endDate: endDay && endDay !== startDay ? endIso : null
+      });
+    }
+  }
+  return rows;
+}
+
+function castrumEventFromRow(row) {
+  const cat = row.category ? `${row.category}` : '';
+  const catLc = cat.toLowerCase();
+  const childCentricCat = /atelier|conte|jeune|famille|installation|exposition/.test(catLc);
+  const priceText = row.booking ? 'Sur réservation (billetterie Castrum)' : 'Accès libre — festival majoritairement gratuit';
+  const locationText = [row.locationName, 'Yverdon-les-Bains'].filter(Boolean).join(', ');
+  const url = `${SOURCES.castrum.eventBase}${row.slug}#${row.startDate.slice(0, 10)}`;
+  const officialSources = [SOURCES.castrum.eventBase + row.slug, SOURCES.castrum.baseUrl + '/grille-horaire'];
+  if (row.bookingLink) officialSources.push(row.bookingLink);
+  return normalizeEvent({
+    source: 'castrum',
+    title: cat ? `${row.title} (${cat}, Le Castrum)` : `${row.title} (Le Castrum)`,
+    startDate: row.startDate,
+    endDate: row.endDate,
+    locationName: row.locationName || 'Le Castrum',
+    locationText,
+    city: 'Yverdon-les-Bains',
+    url,
+    description: clean([
+      row.shortDescription,
+      `Programmé au festival Le Castrum d'Yverdon-les-Bains (cœur historique / esplanade du Château)${row.locationName ? `, ${row.locationName}` : ''}.`,
+      'Festival pluridisciplinaire estival, majoritairement gratuit, plein-air en centre-ville.'
+    ].filter(Boolean).join(' ')),
+    ageText: childCentricCat ? 'famille / tout public' : 'tout public',
+    priceText,
+    tags: inferTags(`festival ${cat} ${row.title} ${row.locationName} plein air Yverdon centre-ville gratuit famille spectacle`),
+    sourceProvenance: `Le Castrum – programme: ${SOURCES.castrum.eventBase}${row.slug} (${cat || 'événement'})`,
+    officialSources,
+    evidence: clean(`${row.title} | ${cat} | ${row.startDate}${row.endDate ? ` → ${row.endDate}` : ''} | ${locationText} | ${priceText}`).slice(0, 1200)
+  });
+}
+
+async function scrapeCastrum() {
+  const json = JSON.parse(fetchCastrumData(SOURCES.castrum.url));
+  const rows = extractCastrumListings(json);
+  const today = new Date().toISOString().slice(0, 10);
+  const events = rows.map(castrumEventFromRow)
+    .filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today);
+  return uniqBy(events, e => recommendationKey(e));
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -3943,7 +4075,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
@@ -4398,6 +4530,44 @@ function runFixtureTests() {
   });
   assert.strictEqual(buskersRameeEvent.startDate, '2026-08-16T11:00:00+02:00', 'Buskers La Ramée should apply the DST-aware local start time');
   assert.strictEqual(estimateDistanceKm(buskersRameeEvent), 44, 'La Ramée (Marin-Epagnier) should resolve a distance from Yverdon');
+  // Le Castrum (SvelteKit devalue __data.json): UTC session instants must shift to
+  // DST-aware Europe/Zurich, never be taken verbatim.
+  assert.strictEqual(castrumUtcToZurichIso('2026-08-08T12:00:00.000Z'), '2026-08-08T14:00:00+02:00', 'Castrum should shift a summer UTC session to +02:00 local');
+  assert.strictEqual(castrumUtcToZurichIso('2026-12-05T13:00:00.000Z'), '2026-12-05T14:00:00+01:00', 'Castrum should shift a winter UTC session to +01:00 local');
+  const castrumPool = [
+    { events: 1 },                                                    // 0
+    [2],                                                              // 1
+    { title: 3, slug: 4, shortDescription: 5, info: 6 },             // 2
+    'OMÂ',                                                            // 3
+    'oma',                                                           // 4
+    'Un spectacle jeune public.',                                    // 5
+    { category: 7, booking: 10, bookingLink: -1, sessions: 11 },     // 6
+    { id: 8, name: 9 },                                              // 7
+    42,                                                              // 8
+    'Spectacle',                                                     // 9
+    true,                                                            // 10
+    [12],                                                            // 11
+    { id: 13, location: 14, startDate: 17, endDate: 18 },            // 12
+    'sess-1',                                                        // 13
+    { id: 15, name: 16 },                                            // 14
+    19,                                                              // 15
+    "L'Échandole",                                                   // 16
+    '2026-08-08T12:00:00.000Z',                                      // 17
+    '2026-08-08T13:00:00.000Z'                                       // 18
+  ];
+  const castrumJson = { type: 'data', nodes: [{ type: 'data', data: castrumPool }] };
+  const castrumRows = extractCastrumListings(castrumJson, new Date('2026-08-08T06:00:00Z'));
+  assert.strictEqual(castrumRows.length, 1, 'Castrum should extract one future session from the devalue pool');
+  assert.strictEqual(castrumRows[0].startDate, '2026-08-08T14:00:00+02:00', 'Castrum session start should be the DST-aware local time');
+  assert.strictEqual(castrumRows[0].endDate, null, 'Castrum same-day end time should collapse to null');
+  assert.strictEqual(castrumRows[0].category, 'Spectacle', 'Castrum should resolve the category name via the devalue pool');
+  assert.strictEqual(castrumRows[0].locationName, "L'Échandole", 'Castrum should resolve the session location name');
+  const castrumEvent = castrumEventFromRow(castrumRows[0]);
+  assert.strictEqual(castrumEvent.startDate, '2026-08-08T14:00:00+02:00', 'Castrum event should keep the DST-aware start');
+  assert.ok(/r[ée]servation/i.test(castrumEvent.priceText), 'Castrum booking session should note reservation');
+  assert.ok(castrumEvent.url.includes('/programme/oma#2026-08-08'), 'Castrum should build a stable per-session detail URL');
+  assert.strictEqual(castrumEvent.city, 'Yverdon-les-Bains');
+  assert.strictEqual(estimateDistanceKm(castrumEvent), 0, 'Le Castrum (Yverdon centre) should resolve to 0 km');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -4499,4 +4669,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum };
