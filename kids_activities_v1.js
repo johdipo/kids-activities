@@ -98,6 +98,28 @@ const LOCATION_KM_FROM_YVERDON = {
   'marin-epagnier': 44,
   marin: 44,
   fribourg: 55,
+  // Jura & Trois-Lacs (J3L) — communes en scope du rayon Yverdon (rive sud du lac /
+  // Broye / Val-de-Travers). Distances routières approx. depuis les coordonnées géo
+  // de l'agenda J3L (≈ vol d'oiseau × 1.3).
+  cheyres: 15,
+  buttes: 18,
+  fleurier: 19,
+  motiers: 19,
+  'môtiers': 19,
+  boveresse: 21,
+  noiraigue: 26,
+  fetigny: 27,
+  'fétigny': 27,
+  bevaix: 30,
+  cortaillod: 31,
+  gletterens: 34,
+  'la chaux-du-milieu': 34,
+  'les charbonnieres': 36,
+  'les charbonnières': 36,
+  colombier: 35,
+  auvernier: 37,
+  portalban: 38,
+  peseux: 39,
   geneve: 85,
   genève: 85
 };
@@ -379,6 +401,25 @@ const SOURCES = {
     baseUrl: 'https://le-castrum.ch',
     eventBase: 'https://le-castrum.ch/programme/',
     kind: 'sveltekit-payload-festival-agenda-yverdon'
+  },
+  j3l: {
+    // Jura & Trois-Lacs (J3L) — agenda régional touristique du Pays des Trois-Lacs
+    // (Pays de Neuchâtel, canton du Jura, Bienne-Seeland, Grand Chasseral, Lac de
+    // Morat/Estavayer-le-Lac, Nord vaudois). Système MyCity Tourism: la page /agenda
+    // embarque une GeoJSON FeatureCollection dans `#list-data` (~1600 manifestations)
+    // avec, par événement, coordonnées géo, ville, région, catégorie, description et
+    // dateFrom/dateTo — pas de pagination ni de JS à exécuter, tout est en clair.
+    // Le canton entier est trop large (task warning « over-broad canton coverage »),
+    // donc la source est **géo-restreinte** à un rayon de RADIUS_KM à vol d'oiseau
+    // autour d'Yverdon: ne garde que le Nord vaudois + rive sud du lac de Neuchâtel /
+    // Broye / Val-de-Travers proches (festivals, fêtes de village, marchés terroir,
+    // plein-air — fit La Dérivée). Ce rayon exclut de fait Neuchâtel-ville (~38 km,
+    // déjà `neuchatelVille`) et le Jura/Bienne lointains; le dédup URL/recommandation
+    // en aval absorbe les recoupements avec `castrum`/`payerne`/`fribourgTerroir`.
+    url: 'https://www.j3l.ch/fr/Z10818/a-faire/manifestations/agenda',
+    baseUrl: 'https://www.j3l.ch',
+    radiusKm: 30,
+    kind: 'regional-tourism-geojson-agenda-geoscoped'
   },
   manualJohan: {
     url: 'manual://johan/kids-activities',
@@ -4029,6 +4070,121 @@ async function scrapeCastrum() {
   return uniqBy(events, e => recommendationKey(e));
 }
 
+// --- Jura & Trois-Lacs (J3L) — agenda régional géo-restreint -------------------
+// MyCity Tourism agenda: the page embeds a GeoJSON FeatureCollection in a
+// `<script id="list-data" type="application/json">` blob (~1600 events). Each
+// feature carries a Point geometry ([lon, lat]) plus title/subtitle/text/href,
+// categorytype/objectCategory, city/region/subregion and dateFrom/dateTo. There is
+// no time or price at listing level, so extraction is intentionally date-level
+// (like `avenches`). The canton is too broad, so events are geo-scoped to a radius
+// around Yverdon (straight-line haversine on the feature coordinates).
+const J3L_YVERDON = { lat: 46.7785, lon: 6.6410 };
+
+function fetchJ3lHtml(url, timeoutMs = 30000) {
+  const maxTime = Math.max(5, Math.ceil(timeoutMs / 1000));
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 24 * 1024 * 1024 });
+}
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  if (![lat1, lon1, lat2, lon2].every(v => Number.isFinite(v))) return null;
+  const R = 6371, toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// Pull the embedded `#list-data` GeoJSON FeatureCollection out of the agenda page.
+function extractJ3lFeatures(html) {
+  const m = /id="list-data"[^>]*>/.exec(html || '');
+  if (!m) return [];
+  const start = m.index + m[0].length;
+  const end = html.indexOf('</script>', start);
+  if (end < 0) return [];
+  let data;
+  try { data = JSON.parse(html.slice(start, end).trim()); } catch { return []; }
+  return Array.isArray(data && data.features) ? data.features : [];
+}
+
+// Keep features within `radiusKm` of Yverdon (straight-line) that have a valid
+// upcoming date, carrying the computed distance for evidence/annotation.
+function j3lScopedRows(features, radiusKm = SOURCES.j3l.radiusKm, todayIso = new Date().toISOString().slice(0, 10)) {
+  const rows = [];
+  for (const f of features || []) {
+    const p = f && f.properties;
+    const g = f && f.geometry;
+    if (!p || !g || g.type !== 'Point' || !Array.isArray(g.coordinates)) continue;
+    const [lon, lat] = g.coordinates;
+    const km = haversineKm(J3L_YVERDON.lat, J3L_YVERDON.lon, lat, lon);
+    if (km == null || km > radiusKm) continue;
+    const startDate = j3lIsoDate(p.dateFrom);
+    if (!startDate) continue;
+    const endIso = j3lIsoDate(p.dateTo);
+    const endDate = endIso && endIso !== startDate ? endIso : null;
+    if ((endDate || startDate) < todayIso) continue;
+    rows.push({ p, startDate, endDate, straightKm: Math.round(km * 10) / 10 });
+  }
+  return rows;
+}
+
+function j3lIsoDate(v) {
+  const m = clean(v || '').match(/(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
+
+function j3lEventFromRow(row) {
+  const p = row.p;
+  const title = clean(decodeHtmlEntities(p.title || ''));
+  const category = clean(decodeHtmlEntities(p.objectCategory || p.subtitle || ''));
+  const city = clean(decodeHtmlEntities(p.city || p.label || p.subregion || ''));
+  const desc = clean(decodeHtmlEntities(p.text || ''));
+  const href = p.href || (p.id ? `/fr/P${p.id}` : '');
+  const url = canonicalUrl(href, SOURCES.j3l.baseUrl);
+  const subregion = clean(decodeHtmlEntities(p.subregion || ''));
+  const locationText = [city, subregion && subregion !== city ? subregion : ''].filter(Boolean).join(', ') || city;
+  const hay = `${title} ${desc} ${category}`.toLowerCase();
+  const ageText = /famille|enfant|jeune public|tout public|kids|petits/.test(hay) ? 'famille / tout public (à confirmer)' : '';
+  const priceText = /gratuit|entrée libre|entree libre|accès libre|acces libre|offert|chapeau/.test(hay) ? 'Gratuit / accès libre (à confirmer)' : '';
+  return normalizeEvent({
+    source: 'j3l',
+    title,
+    startDate: row.startDate,
+    endDate: row.endDate,
+    locationName: city,
+    locationText,
+    city,
+    url,
+    description: [desc, category ? `Catégorie: ${category}.` : ''].filter(Boolean).join(' '),
+    ageText,
+    priceText,
+    tags: inferTags(`${title} ${desc} ${category} ${city} plein air festival terroir`),
+    sourceProvenance: `Jura & Trois-Lacs (J3L) — agenda régional (${category || 'manifestation'}, ~${row.straightKm} km d'Yverdon): ${url}`,
+    officialSources: [url].filter(Boolean),
+    evidence: clean([
+      title,
+      `${row.startDate}${row.endDate ? ` → ${row.endDate}` : ''}`,
+      city && `lieu ${city}`,
+      category,
+      `≈${row.straightKm} km d'Yverdon`,
+      desc
+    ].filter(Boolean).join(' | ')).slice(0, 1200)
+  });
+}
+
+async function scrapeJ3l() {
+  let html;
+  try {
+    html = fetchJ3lHtml(SOURCES.j3l.url);
+  } catch (e) {
+    return [{ source: 'j3l', title: 'J3L agenda', url: SOURCES.j3l.url, error: e.message }];
+  }
+  const features = extractJ3lFeatures(html);
+  const rows = j3lScopedRows(features);
+  const today = new Date().toISOString().slice(0, 10);
+  const events = rows.map(j3lEventFromRow)
+    .filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today);
+  return uniqBy(events, e => recommendationKey(e));
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -4075,7 +4231,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
+  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
     const started = new Date().toISOString();
     try {
       const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
@@ -4568,6 +4724,32 @@ function runFixtureTests() {
   assert.ok(castrumEvent.url.includes('/programme/oma#2026-08-08'), 'Castrum should build a stable per-session detail URL');
   assert.strictEqual(castrumEvent.city, 'Yverdon-les-Bains');
   assert.strictEqual(estimateDistanceKm(castrumEvent), 0, 'Le Castrum (Yverdon centre) should resolve to 0 km');
+  // J3L — geo-scoped GeoJSON agenda: in-radius near event kept, far event dropped.
+  assert.strictEqual(Math.round(haversineKm(46.7785, 6.6410, 46.7785, 6.6410)), 0, 'haversine of a point with itself is 0');
+  const j3lHtml = '<html><body><script id="list-data" type="application/json">'
+    + JSON.stringify({ type: 'FeatureCollection', features: [
+        { type: 'Feature', geometry: { type: 'Point', coordinates: [6.845, 46.847] }, properties: { type: 'poi', id: 8765, title: 'Fête de la tomate', subtitle: 'Fête, festival', objectCategory: 'Fête, festival', text: 'Marché gourmand en plein air, entrée libre.', href: '/fr/P8765', city: 'Cheyres', region: ['9'], subregion: 'Broye', dateFrom: '2026-09-05', dateTo: '2026-09-06' } },
+        { type: 'Feature', geometry: { type: 'Point', coordinates: [7.344, 47.222] }, properties: { type: 'poi', id: 4321, title: 'Marché de Noël de Delémont', subtitle: 'Marché', objectCategory: 'Coutume, marché', text: 'Loin d’Yverdon.', href: '/fr/P4321', city: 'Delémont', region: ['6'], subregion: 'Jura', dateFrom: '2026-12-05', dateTo: '2026-12-05' } },
+        { type: 'Feature', geometry: { type: 'Point', coordinates: [6.641, 46.778] }, properties: { type: 'poi', id: 1111, title: 'Vieux concert', subtitle: 'Concert', objectCategory: 'Concert', text: 'Passé.', href: '/fr/P1111', city: 'Yverdon-les-Bains', region: ['10'], subregion: 'Nord vaudois', dateFrom: '2020-01-01', dateTo: '2020-01-01' } }
+      ] })
+    + '</script></body></html>';
+  const j3lFeatures = extractJ3lFeatures(j3lHtml);
+  assert.strictEqual(j3lFeatures.length, 3, 'J3L should extract all embedded #list-data features');
+  const j3lRows = j3lScopedRows(j3lFeatures, 30, '2026-08-09');
+  assert.strictEqual(j3lRows.length, 1, 'J3L should keep only the in-radius upcoming feature (Cheyres in, Delémont out, past out)');
+  assert.strictEqual(j3lRows[0].p.city, 'Cheyres');
+  assert.strictEqual(j3lRows[0].startDate, '2026-09-05');
+  assert.strictEqual(j3lRows[0].endDate, '2026-09-06', 'J3L multi-day range keeps the end date');
+  assert.ok(j3lRows[0].straightKm > 0 && j3lRows[0].straightKm < 30, 'J3L should carry a plausible straight-line distance');
+  const j3lEvent = j3lEventFromRow(j3lRows[0]);
+  assert.strictEqual(j3lEvent.source, 'j3l');
+  assert.strictEqual(j3lEvent.title, 'Fête de la tomate', 'J3L should decode entities in the title');
+  assert.strictEqual(j3lEvent.city, 'Cheyres');
+  assert.ok(j3lEvent.url.endsWith('/fr/P8765'), 'J3L should build a stable /fr/P<id> detail URL');
+  assert.ok(/libre|gratuit/i.test(j3lEvent.priceText), 'J3L should flag entrée libre evidence');
+  assert.strictEqual(estimateDistanceKm(j3lEvent), 15, 'J3L Cheyres should resolve a short distance from Yverdon');
+  assert.strictEqual(j3lIsoDate('2026-09-05'), '2026-09-05');
+  assert.strictEqual(j3lIsoDate('bogus'), null);
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -4669,4 +4851,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l };
