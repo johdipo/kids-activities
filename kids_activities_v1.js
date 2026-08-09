@@ -839,8 +839,12 @@ async function scrapeYverdon() {
   }).get().filter(x => x.url && (x.anchorText || x.parentText) && !/^fr$|^de$|^español$/i.test(x.anchorText)), x => x.url).slice(0, 80);
 
   const events = [];
-  for (let i = 0; i < links.length; i += 8) {
-    const batch = links.slice(i, i + 8);
+  // Widened batch 8→16 (TASK-228): this WordPress/Elementor site serves detail
+  // pages slowly, and 80 links in batches of 8 pinned the source at ~90s (the old
+  // guard boundary). 16-wide halves the number of sequential rounds so the source
+  // finishes well under the timeout even when other sources run concurrently.
+  for (let i = 0; i < links.length; i += 16) {
+    const batch = links.slice(i, i + 16);
     const results = await Promise.all(batch.map(async link => {
       try {
         const detailHtml = await fetchHtml(link.url, 30000);
@@ -1001,21 +1005,30 @@ async function scrapeYverdonVille() {
       }
       nextUrl = payload.next || '';
     }
-    for (const id of [...new Set(ids)]) {
-      try {
-        const detail = await fetchEmoiJson(`${SOURCES.yverdonVille.apiUrl}/${id}`, 25000);
-        const raw = detail?.properties || detail || {};
-        events.push(buildGeocityEvent(raw, {
-          source,
-          url: yverdonVilleEventUrl(id, theme.page),
-          fallbackLocation: 'Yverdon-les-Bains',
-          defaultCity: 'Yverdon-les-Bains',
-          sourceProvenance: `Ville d'Yverdon-les-Bains agenda officiel (${theme.label}) via Geocity ${theme.domain} API`,
-          extraEvidence: `agenda ${theme.label}`
-        }));
-      } catch (e) {
-        events.push({ source, title: `Yverdon-les-Bains event ${id}`, url: yverdonVilleEventUrl(id, theme.page), error: e.message });
-      }
+    // Fetch event details in parallel batches instead of one-by-one. The old
+    // sequential loop over up to ~500 ids (25s each) always blew the per-source
+    // guard and returned 0 events (TASK-228); batching keeps it well within the
+    // window while still self-limiting to avoid hammering the Geocity API.
+    const uniqueIds = [...new Set(ids)].slice(0, 120);
+    for (let i = 0; i < uniqueIds.length; i += 8) {
+      const batch = uniqueIds.slice(i, i + 8);
+      const results = await Promise.all(batch.map(async id => {
+        try {
+          const detail = await fetchEmoiJson(`${SOURCES.yverdonVille.apiUrl}/${id}`, 20000);
+          const raw = detail?.properties || detail || {};
+          return buildGeocityEvent(raw, {
+            source,
+            url: yverdonVilleEventUrl(id, theme.page),
+            fallbackLocation: 'Yverdon-les-Bains',
+            defaultCity: 'Yverdon-les-Bains',
+            sourceProvenance: `Ville d'Yverdon-les-Bains agenda officiel (${theme.label}) via Geocity ${theme.domain} API`,
+            extraEvidence: `agenda ${theme.label}`
+          });
+        } catch (e) {
+          return { source, title: `Yverdon-les-Bains event ${id}`, url: yverdonVilleEventUrl(id, theme.page), error: e.message };
+        }
+      }));
+      events.push(...results);
     }
   }
   return events.filter(e => !e.error);
@@ -4211,11 +4224,24 @@ function canonicalRecommendationPool(events) {
 }
 
 // Per-source wall-clock guard. Individual fetches already abort at 15-30s, but a
-// stalled DNS/body-read or a paginating source can still block the sequential
-// collectAll loop indefinitely (root cause of the 2026-06-25 silent collection
-// hang: no artifact produced). withTimeout rejects loudly so one bad source is
-// logged as an error and the run continues with the remaining sources.
+// stalled DNS/body-read or a paginating source can still block collectAll
+// indefinitely (root cause of the 2026-06-25 silent collection hang: no artifact
+// produced). withTimeout rejects loudly so one bad source is logged as an error
+// and the run continues with the remaining sources.
+// Kept at 90s (TASK-228): with parallel collection a slow source no longer
+// blocks the others, so the guard's only job is to cut a truly hung source. A
+// few legitimate sources (yverdon ~45s after batch widening, emoi ~50s) need
+// more than 60s under concurrent load, so 90s avoids cutting real coverage while
+// still bounding the worst case.
 const SOURCE_TIMEOUT_MS = 90000;
+// How many sources fetch concurrently. Sources mostly hit distinct hosts, so
+// bounded parallelism turns the full pass from sum-of-durations into roughly the
+// slowest cluster. Kept at 4 (TASK-228): each scraper also fans out its own
+// internal detail fetches (batches of ~8), so a higher source-level concurrency
+// saturated the connection pool and made heavy sources like grandson/yverdon
+// abort mid-fetch. 4 stays comfortably under the 5-min target while leaving each
+// source enough network headroom to finish.
+const SOURCE_CONCURRENCY = 4;
 function withTimeout(promise, ms, label) {
   let timer;
   const guard = new Promise((_, reject) => {
@@ -4225,32 +4251,48 @@ function withTimeout(promise, ms, label) {
 }
 
 async function collectAll() {
-  const sourceLogs = [];
-  const out = [];
-  // Local Johan/manual sources are intentionally loaded first: they are durable,
+  // Local Johan/manual sources are intentionally listed first: they are durable,
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  for (const [source, fn] of Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids })) {
-    const started = new Date().toISOString();
-    try {
-      const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
-      const items = Array.isArray(result) ? result : (result.events || []);
-      out.push(...items);
-      sourceLogs.push({
-        source,
-        status: 'ok',
-        fetchedAt: started,
-        count: items.length,
-        ...(result && !Array.isArray(result) && result.note ? { note: result.note } : {}),
-        ...(result && !Array.isArray(result) && result.diagnostics ? { diagnostics: result.diagnostics } : {})
-      });
-      console.log(`[OK] ${source}: ${items.length} events${result && !Array.isArray(result) && result.note ? ` — ${result.note}` : ''}`);
-    } catch (e) {
-      sourceLogs.push({ source, status: 'error', fetchedAt: started, error: e.message });
-      console.log(`[ERR] ${source}: ${e.message}`);
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids });
+
+  // Run sources with bounded concurrency so one slow/hanging source no longer
+  // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
+  // Results are written back by index so the flattened event order stays
+  // deterministic and manual-first, keeping uniqBy() dedupe preference stable
+  // regardless of completion order.
+  const perSource = new Array(sources.length);
+  const sourceLogs = new Array(sources.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < sources.length) {
+      const idx = cursor++;
+      const [source, fn] = sources[idx];
+      const started = new Date().toISOString();
+      try {
+        const result = await withTimeout(fn(), SOURCE_TIMEOUT_MS, source);
+        const items = Array.isArray(result) ? result : (result.events || []);
+        perSource[idx] = items;
+        sourceLogs[idx] = {
+          source,
+          status: 'ok',
+          fetchedAt: started,
+          count: items.length,
+          ...(result && !Array.isArray(result) && result.note ? { note: result.note } : {}),
+          ...(result && !Array.isArray(result) && result.diagnostics ? { diagnostics: result.diagnostics } : {})
+        };
+        console.log(`[OK] ${source}: ${items.length} events${result && !Array.isArray(result) && result.note ? ` — ${result.note}` : ''}`);
+      } catch (e) {
+        perSource[idx] = [];
+        sourceLogs[idx] = { source, status: 'error', fetchedAt: started, error: e.message };
+        console.log(`[ERR] ${source}: ${e.message}`);
+      }
     }
   }
+  await Promise.all(Array.from({ length: Math.min(SOURCE_CONCURRENCY, sources.length) }, worker));
+
+  const out = perSource.flat();
   return { events: uniqBy(out, e => e.id || `${e.url}|${e.title}`), sourceLogs };
 }
 
