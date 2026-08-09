@@ -2542,6 +2542,170 @@ function scoreEvent(e, window) {
   };
 }
 
+// --- Two-stage scoring (TASK-229) ---------------------------------------------
+// Stage 1: cheap score on listing-only fields, computed for every accepted event
+// (no network). Stage 2: for promising *and* data-poor candidates only, fetch the
+// detail page, enrich description/age/price/tags, and re-score. Capped per run and
+// robust — any fetch/parse failure falls back cleanly to the stage-1 score.
+const TWO_STAGE_CONFIG = {
+  enabled: true,
+  stage1Threshold: 45,   // stage-1 total at/above which a candidate is "promising"
+  topNPerSource: 3,      // also enrich the top-N per source even if below threshold
+  maxDetailFetches: 25,  // hard cap on detail fetches per run
+  detailTimeoutMs: 15000
+};
+
+// Listing-only projection of an event: strips fields that realistically only exist
+// on a detail page (long description, explicit age/price) and re-derives tags from
+// the title + location alone. Stage-1 scoring runs on this so its number reflects
+// "what the scraper listing gives us", independent of any accidental enrichment.
+function listingView(e) {
+  const listingTags = inferTags(`${e.title} ${e.locationText || e.city || ''}`);
+  return {
+    ...e,
+    description: '',
+    ageMin: null,
+    ageMax: null,
+    ageText: '',
+    priceText: '',
+    tags: listingTags
+  };
+}
+
+function scoreEventStage1(e, window) {
+  const s = scoreEvent(listingView(e), window);
+  s.stage = 1;
+  s.stage1Total = s.total;
+  return s;
+}
+
+// True when the event lacks detail-only signals that a detail fetch could add.
+function isDataPoor(e) {
+  const thinDescription = clean(e.description || '').length < 60;
+  const noAge = e.ageMin == null && e.ageMax == null && !clean(e.ageText || '');
+  const noPrice = !clean(e.priceText || '');
+  return thinDescription || noAge || noPrice;
+}
+
+// Only real http(s) detail pages are fetchable — skip manual:// and empty URLs.
+function isEnrichableUrl(url) {
+  return typeof url === 'string' && /^https?:\/\//i.test(url);
+}
+
+// Generic detail-page extractor. Sources have bespoke parseXxxDetail() for their
+// own listing→detail flows; this is the fallback used by the conditional enrichment
+// layer for aggregator events (e.g. j3l) that arrive data-poor with only a URL.
+function extractDetailFields(html, e) {
+  const $ = cheerio.load(html);
+  const text = bestDetailText($, e.title) || clean($('main').first().text()) || clean($('body').text());
+  if (!text) return {};
+  const priceMatch = text.match(/gratuit\w*|entr[ée]e libre|acc[èe]s libre|\bchf\s*\d+(?:[.,]\d+)?|\d+(?:[.,]\d+)?\s*(?:chf|fr\.?|\.-)/i);
+  const priceText = priceMatch ? clean(priceMatch[0]) : '';
+  const age = parseAge('', text);
+  return {
+    description: text.slice(0, 700),
+    priceText,
+    ageText: age.ageText,
+    text
+  };
+}
+
+// Re-normalize an event with detail fields merged in, preserving existing tags and
+// unioning freshly inferred ones from the richer text. Returns a new event object.
+function mergeEnrichment(e, fields) {
+  if (!fields || !fields.description) return e;
+  const description = clean(fields.description) || e.description;
+  const inferred = inferTags(`${e.title} ${description} ${e.locationText || ''}`);
+  const tags = [...new Set([...(e.tags || []), ...inferred])];
+  return normalizeEvent({
+    ...e,
+    description,
+    ageText: clean(e.ageText || '') || fields.ageText || '',
+    priceText: clean(e.priceText || '') || fields.priceText || '',
+    tags,
+    evidence: clean(`${e.evidence || ''} ${fields.text || fields.description || ''}`).slice(0, 1200)
+  });
+}
+
+// Selects promising candidates (threshold OR top-N per source) from a stage-1
+// scored list. Returns the set of scored-item references eligible for stage 2.
+function selectPromising(scored, cfg) {
+  const promising = new Set();
+  for (const item of scored) if (item.score.total >= cfg.stage1Threshold) promising.add(item);
+  const bySource = new Map();
+  for (const item of scored) {
+    const src = item.event.source || 'unknown';
+    if (!bySource.has(src)) bySource.set(src, []);
+    bySource.get(src).push(item);
+  }
+  for (const items of bySource.values()) {
+    items.sort((a, b) => b.score.total - a.score.total);
+    for (const item of items.slice(0, cfg.topNPerSource)) promising.add(item);
+  }
+  return promising;
+}
+
+// Stage 2: conditionally enrich the promising, data-poor, fetchable candidates and
+// re-score them. `fetchDetail` is injectable so fixture tests never hit the network.
+// Mutates each scored item in place (event + score) and returns run statistics.
+async function enrichPromisingCandidates(scored, window, opts = {}) {
+  const cfg = { ...TWO_STAGE_CONFIG, ...opts };
+  const fetchDetail = opts.fetchDetail || ((url) => fetchHtml(url, cfg.detailTimeoutMs));
+  const startedAt = Date.now();
+  const stats = {
+    accepted: scored.length,
+    enrichableAccepted: scored.filter(s => isEnrichableUrl(s.event.url)).length, // "before": systematic-fetch baseline
+    promising: 0,
+    fetchAttempts: 0,
+    fetchSuccess: 0,
+    fetchFailures: 0,
+    enrichedRescored: 0,
+    improved: 0,
+    fetched: []
+  };
+  if (!cfg.enabled) { stats.elapsedMs = Date.now() - startedAt; return stats; }
+
+  const promising = selectPromising(scored, cfg);
+  stats.promising = promising.size;
+  // Fetch in descending stage-1 order so the cap spends on the best candidates.
+  const queue = [...promising]
+    .filter(item => isEnrichableUrl(item.event.url) && isDataPoor(item.event))
+    .sort((a, b) => b.score.total - a.score.total);
+
+  for (const item of queue) {
+    if (stats.fetchAttempts >= cfg.maxDetailFetches) break;
+    stats.fetchAttempts += 1;
+    let html;
+    try {
+      html = await fetchDetail(item.event.url);
+      stats.fetchSuccess += 1;
+    } catch (err) {
+      stats.fetchFailures += 1;
+      stats.fetched.push({ url: item.event.url, ok: false, error: err.message });
+      continue; // robust fallback: keep the stage-1 score untouched
+    }
+    try {
+      const fields = extractDetailFields(html, item.event);
+      const enriched = mergeEnrichment(item.event, fields);
+      const newScore = scoreEvent(enriched, window);
+      const before = item.score.total;
+      item.event = enriched;
+      item.score = newScore;
+      item.score.stage = 2;
+      item.score.stage1Total = before;
+      item.enriched = true;
+      stats.enrichedRescored += 1;
+      if (newScore.total > before) stats.improved += 1;
+      stats.fetched.push({ url: enriched.url, ok: true, before, after: newScore.total });
+    } catch (err) {
+      // Parse/score failure after a successful fetch: keep stage-1 score.
+      stats.fetched.push({ url: item.event.url, ok: false, error: `enrich: ${err.message}` });
+    }
+  }
+  stats.elapsedMs = Date.now() - startedAt;
+  return stats;
+}
+
 function hasChildCentricSignal(e) {
   const text = `${e.title} ${e.description} ${e.ageText}`;
   const tags = new Set(e.tags || []);
@@ -4296,7 +4460,7 @@ async function collectAll() {
   return { events: uniqBy(out, e => e.id || `${e.url}|${e.title}`), sourceLogs };
 }
 
-function runFixtureTests() {
+async function runFixtureTests() {
   const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname, 'test-corpus/events-fixtures.json'), 'utf8')).fixtures;
   const window = { start: '2026-05-23', endExclusive: '2026-05-25' };
   for (const f of fixtures) {
@@ -4828,11 +4992,79 @@ function runFixtureTests() {
   assert(candidates.diagnostics.topCandidates.some(s => /pommier/i.test(s.name)), 'source candidates should include Le Pommier');
   assert(candidates.diagnostics.topCandidates.some(s => /Benno Besson/i.test(s.name)), 'source candidates should include Théâtre Benno Besson');
   assert(candidates.diagnostics.topCandidates.some(s => /Échandole|Echandole/i.test(s.name)), 'source candidates should include L’Échandole');
+  // --- Two-stage scoring tests (TASK-229) -----------------------------------
+  // A data-poor aggregator candidate (j3l-style: strong listing signals, but no
+  // description/age/price) should be selected as promising, get its detail page
+  // fetched, and rise after enrichment. A non-promising far/dull event must never
+  // be fetched.
+  {
+    const twoWindow = { start: '2026-05-23', endExclusive: '2026-05-25' };
+    const poor = normalizeEvent({
+      source: 'j3l',
+      title: 'Atelier nature et découverte des animaux pour enfants',
+      startDate: '2026-05-23T10:00:00+02:00',
+      locationText: 'Yverdon-les-Bains',
+      url: 'https://agenda.example.invalid/atelier-nature-enfants'
+      // deliberately no description / ageText / priceText → data-poor
+    });
+    const dull = normalizeEvent({
+      source: 'j3l',
+      title: 'Assemblée générale ordinaire du comité',
+      startDate: '2026-05-23T20:00:00+02:00',
+      locationText: 'Genève',
+      description: 'Ordre du jour statutaire, rapports annuels et votations internes du comité pour les membres.',
+      ageText: 'adultes / membres',
+      priceText: 'Réservé aux membres',
+      url: 'https://agenda.example.invalid/assemblee-generale'
+    });
+    assert(isDataPoor(poor), 'poor candidate should be data-poor');
+    assert(!isDataPoor(dull), 'dull candidate is data-rich, not a fetch target');
+
+    const scoredTwo = [poor, dull].map(event => ({ event, score: scoreEventStage1(event, twoWindow) }));
+    const stage1Poor = scoredTwo[0].score.total;
+
+    // Detail page the enrichment layer will fetch for the poor candidate only.
+    const detailHtml = '<html><body><main><h1>Atelier nature et découverte des animaux pour enfants</h1>' +
+      '<p>Organisation Pro Natura. Lieu Yverdon-les-Bains. Horaires 10h-12h. Prix Gratuit. ' +
+      'Atelier famille dès 4 ans: observation des insectes, des oiseaux et petite balade nature au bord du lac ' +
+      'avec un animateur. Sur inscription, goûter offert aux enfants.</p></main></body></html>';
+    const fetched = [];
+    const fetchDetail = async (url) => {
+      fetched.push(url);
+      if (/atelier-nature-enfants/.test(url)) return detailHtml;
+      throw new Error(`unexpected fetch: ${url}`);
+    };
+
+    // Threshold chosen so only the strong listing candidate is promising; topN=0 so
+    // selection is threshold-only (the dull event must not sneak in via top-N).
+    const cfg = { stage1Threshold: stage1Poor, topNPerSource: 0, maxDetailFetches: 25, fetchDetail };
+    const stats = await enrichPromisingCandidates(scoredTwo, twoWindow, cfg);
+
+    assert.deepStrictEqual(fetched, [poor.url], `only the promising data-poor candidate should be fetched, got ${JSON.stringify(fetched)}`);
+    assert.strictEqual(stats.fetchAttempts, 1, `exactly one detail fetch expected, got ${stats.fetchAttempts}`);
+    assert.strictEqual(stats.enrichedRescored, 1, 'enriched candidate should be re-scored');
+    const poorItem = scoredTwo.find(s => s.event.url === poor.url);
+    assert(poorItem.enriched, 'poor candidate should be marked enriched');
+    assert(poorItem.score.total > stage1Poor, `enriched score ${poorItem.score.total} should exceed stage-1 ${stage1Poor}`);
+    assert(poorItem.event.ageMin === 4, `enrichment should extract "dès 4 ans" (got ${poorItem.event.ageMin})`);
+    assert(/gratuit/i.test(poorItem.event.priceText), 'enrichment should extract the free-entry price');
+
+    // Robust fallback: a fetch that throws must leave the stage-1 score intact.
+    const scoredFail = [normalizeEvent({ ...poor })].map(event => ({ event, score: scoreEventStage1(event, twoWindow) }));
+    const s1 = scoredFail[0].score.total;
+    const failStats = await enrichPromisingCandidates(scoredFail, twoWindow, {
+      stage1Threshold: s1, topNPerSource: 0, fetchDetail: async () => { throw new Error('network down'); }
+    });
+    assert.strictEqual(failStats.fetchFailures, 1, 'one failed fetch expected');
+    assert.strictEqual(scoredFail[0].score.total, s1, 'failed enrichment must fall back to stage-1 score');
+    assert(!scoredFail[0].enriched, 'failed candidate should not be marked enriched');
+    console.log(`[TEST] two-stage scoring: poor ${stage1Poor} -> ${poorItem.score.total} (enriched), dull never fetched, fetch-failure falls back cleanly`);
+  }
   console.log(`[TEST] fixture/date/source-probe tests passed (${fixtures.length} fixtures)`);
 }
 
 async function main() {
-  if (process.argv.includes('--fixture-test')) { runFixtureTests(); return; }
+  if (process.argv.includes('--fixture-test')) { await runFixtureTests(); return; }
   const windowArg = process.argv.find(a => a.startsWith('--window='));
   const window = windowArg ? (() => { const [start, endExclusive] = windowArg.split('=')[1].split(':'); return { start, endExclusive }; })() : nextWeekendWindow(new Date());
   const { events, sourceLogs } = await collectAll();
@@ -4844,7 +5076,13 @@ async function main() {
     const reason = rejectionReason(e, window);
     if (reason) rejected.push({ reason, event: e }); else accepted.push(e);
   }
-  const scored = accepted.map(event => ({ event, score: scoreEvent(event, window) })).sort((a,b) => b.score.total - a.score.total);
+  // Stage 1: cheap score for every accepted event on listing-only fields.
+  const scored = accepted.map(event => ({ event, score: scoreEventStage1(event, window) }));
+  // Stage 2: conditionally fetch detail pages for promising + data-poor candidates
+  // and re-score. Falls back to the stage-1 score on any fetch/parse failure.
+  const twoStage = await enrichPromisingCandidates(scored, window);
+  scored.sort((a, b) => b.score.total - a.score.total);
+  console.log(`Two-stage scoring: accepted=${twoStage.accepted} promising=${twoStage.promising} detailFetches=${twoStage.fetchAttempts}/${twoStage.enrichableAccepted} (systematic baseline) success=${twoStage.fetchSuccess} failures=${twoStage.fetchFailures} rescored=${twoStage.enrichedRescored} improved=${twoStage.improved} in ${twoStage.elapsedMs}ms`);
   const quality = inspectQuality(normalized, accepted, rejected, sourceLogs);
   const summary = telegramSummary(scored, window);
   const reviewQueue = eventReviewQueue(scored, window);
@@ -4857,6 +5095,7 @@ async function main() {
   fs.writeFileSync(path.join(outDir, 'normalized-events.json'), JSON.stringify({ generatedAt: new Date().toISOString(), window, count: normalized.length, events: normalized }, null, 2));
   fs.writeFileSync(path.join(outDir, 'quality-inspection.json'), JSON.stringify(quality, null, 2));
   fs.writeFileSync(path.join(outDir, 'scored-events.json'), JSON.stringify({ window, count: scored.length, scored }, null, 2));
+  fs.writeFileSync(path.join(outDir, 'two-stage-scoring.json'), JSON.stringify(twoStage, null, 2));
   fs.writeFileSync(path.join(outDir, 'event-review-queue.json'), JSON.stringify(reviewQueue, null, 2));
   fs.writeFileSync(path.join(outDir, 'event-reviews', 'TODO.md'), eventReviewQueueMarkdown(reviewQueue));
   fs.writeFileSync(path.join(outDir, 'telegram-summary.txt'), summary + '\n');
@@ -4893,4 +5132,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l };
