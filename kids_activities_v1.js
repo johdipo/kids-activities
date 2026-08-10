@@ -421,6 +421,25 @@ const SOURCES = {
     radiusKm: 30,
     kind: 'regional-tourism-geojson-agenda-geoscoped'
   },
+  grandsonChateau: {
+    // Château de Grandson — agenda propre du château (Place du Château, 1422 Grandson,
+    // ~5 km d'Yverdon). Distinct de la source `grandson` (agenda de la COMMUNE de
+    // Grandson): ici c'est le programme événementiel du château médiéval lui-même —
+    // Fête Médiévale, ateliers enfants (« Mon armoirie à moi »), spectacles jeune public
+    // (« La Légende du Chevalier Vert »), visites guidées gratuites mensuelles, Journée
+    // des châteaux suisses, concerts dans les caves, cafés scientifiques. Fort ancrage
+    // famille / patrimoine / plein-air (esplanade + cour du château) → bon fit La Dérivée.
+    // Plateforme: WordPress (thème Tailwind "grandson-theme", Antistatique). La page
+    // /agenda/ rend des cartes statiques (grille `grid-cols-[1fr_2fr_1fr]`) portant titre,
+    // date FR (jour unique, week-end « X et Y », liste « 12, 16, 19 et 23 », ou range
+    // « du X au Y »), horaire « HHhMM - HHhMM », et des tags mêlant catégorie / public
+    // (« Dès 8 ans », « Tout public ») / prix (« Gratuit »). Chaque carte lie une page
+    // de détail `/agenda/<slug>/` (Yoast JSON-LD description + encart « Informations
+    // pratiques » Date/Horaires/Tarifs + lien billetterie/organisateur externe).
+    url: 'https://chateau-grandson.ch/agenda/',
+    baseUrl: 'https://chateau-grandson.ch',
+    kind: 'wordpress-castle-family-heritage-agenda'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -4362,6 +4381,182 @@ async function scrapeJ3l() {
   return uniqBy(events, e => recommendationKey(e));
 }
 
+// --- Château de Grandson — agenda du château médiéval -----------------------
+function fetchGrandsonChateauHtml(url, timeoutMs = 25000) {
+  const maxTime = Math.max(5, Math.ceil(timeoutMs / 1000));
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
+}
+
+// Parse the château's French date label into one or more {startDate,endDate} ISO
+// occurrences. Handles:
+//   "Dimanche 6 septembre 2026"          -> single day
+//   "Samedi 8 et dimanche 9 août 2026"   -> contiguous days  -> one multi-day range
+//   "12, 16, 19 et 23 août 2026"         -> discrete list    -> N single-day events
+//   "Du 8 au 15 août 2026" / cross-month -> explicit range
+// The card label carries no time; the time comes from the separate horaire field.
+function parseGrandsonChateauDates(text, fallbackYear = new Date().getFullYear()) {
+  const raw = clean(text).toLowerCase().replace(/1er/g, '1');
+  const yearM = raw.match(/\b(20\d{2})\b/);
+  const year = yearM ? yearM[1] : String(fallbackYear);
+  const t = yearM ? raw.replace(yearM[0], ' ') : raw;
+  const months = [...t.matchAll(new RegExp(`(${MONTH_RE})`, 'gi'))]
+    .map(m => ({ i: m.index, month: MONTHS[m[1].toLowerCase().replace(/\.$/, '')] }))
+    .filter(m => m.month);
+  if (!months.length) return [];
+  const monthFor = (pos) => (months.find(m => m.i >= pos) || months[months.length - 1]).month;
+  const iso = (day, month) => `${year}-${month}-${String(day).padStart(2, '0')}`;
+  // Explicit range: "X [mois] au Y", "du X au Y", "X–Y" (no comma list).
+  const rangeM = t.match(new RegExp(`(\\d{1,2})\\s*(?:${MONTH_RE})?\\.?\\s*(?:au|–|—|-)\\s*(\\d{1,2})`, 'i'));
+  if (rangeM && !/,/.test(t)) {
+    const start = iso(rangeM[1], monthFor(rangeM.index));
+    const d2Pos = t.indexOf(rangeM[2], rangeM.index + rangeM[0].length - rangeM[2].length);
+    const end = iso(rangeM[2], monthFor(d2Pos < 0 ? rangeM.index : d2Pos));
+    return [{ startDate: start, endDate: end === start ? null : end }];
+  }
+  // Discrete day numbers (the year has been stripped, no times in this field).
+  const seen = new Set();
+  const items = [];
+  for (const m of t.matchAll(/\d{1,2}/g)) {
+    const n = Number(m[0]);
+    if (n < 1 || n > 31) continue;
+    const month = monthFor(m.index);
+    const key = `${month}-${m[0]}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push({ day: n, month, startDate: iso(m[0], month) });
+  }
+  if (!items.length) return [];
+  items.sort((a, b) => a.startDate.localeCompare(b.startDate));
+  const sameMonth = items.every(x => x.month === items[0].month);
+  const contiguous = sameMonth && items.length > 1 && items[items.length - 1].day - items[0].day === items.length - 1;
+  if (contiguous) return [{ startDate: items[0].startDate, endDate: items[items.length - 1].startDate }];
+  return items.map(x => ({ startDate: x.startDate, endDate: null }));
+}
+
+// "13h30 - 17h00" / "14h00" / "17h00 – 22h00" -> { startTime, endTime } as HH:MM.
+function parseGrandsonChateauTime(text) {
+  const times = [...clean(text).matchAll(/(\d{1,2})\s*h\s*(\d{2})?/gi)]
+    .map(m => `${m[1].padStart(2, '0')}:${(m[2] || '00').padStart(2, '0')}`);
+  return { startTime: times[0] || '', endTime: times[1] || '' };
+}
+
+// Extract event cards from the /agenda/ listing. Each `grid-cols-[1fr_2fr_1fr]` card
+// carries a title anchor to `/agenda/<slug>/`, a French date label, a horaire and a
+// mix of category/public/price tags.
+function extractGrandsonChateauListings(html, baseUrl = SOURCES.grandsonChateau.baseUrl) {
+  const $ = cheerio.load(html);
+  const items = [];
+  $('div[class*="grid-cols-[1fr_2fr_1fr]"]').each((_, el) => {
+    const $c = $(el);
+    const $title = $c.find('a[class*="text-xl"]').first();
+    const title = clean($title.text());
+    const href = $title.attr('href') || $c.find('a[href*="/agenda/"]').first().attr('href') || '';
+    if (!title || !/\/agenda\/[a-z0-9]/i.test(href)) return;
+    const info = $c.find('div[class*="row-span-2"]').first();
+    const dateText = clean(info.find('div[class*="font-medium"]').first().text());
+    const timeM = clean(info.text()).match(/\d{1,2}\s*h\s*\d{0,2}(?:\s*[-–—]\s*\d{1,2}\s*h\s*\d{0,2})?/i);
+    const timeText = timeM ? timeM[0] : '';
+    const tags = info.find('div[class*="bg-neutral-100"]').map((__, t) => clean($(t).text())).get().filter(Boolean);
+    items.push({ url: canonicalUrl(href, baseUrl) || href, title, dateText, timeText, tags });
+  });
+  return uniqBy(items, x => x.url);
+}
+
+// Enrich a card from its /agenda/<slug>/ detail page: Yoast JSON-LD WebPage
+// description, the "Informations pratiques" Tarifs value, and the first external
+// billetterie/organisateur link (non-social).
+function parseGrandsonChateauDetail(html) {
+  let description = '';
+  const ld = html.match(/<script type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/);
+  if (ld) {
+    try {
+      const graph = JSON.parse(ld[1])['@graph'] || [];
+      const wp = graph.find(g => g['@type'] === 'WebPage');
+      if (wp && wp.description) description = clean(wp.description);
+    } catch { /* fall back to the listing title */ }
+  }
+  const tarifM = html.match(/Tarifs\s*<\/[^>]+>\s*<[^>]*>\s*([^<]+?)\s*</i);
+  const tarifs = tarifM ? clean(decodeHtmlEntities(tarifM[1])) : '';
+  const social = /facebook|instagram|tiktok|youtube|linkedin|twitter|x\.com|gmpg\.org|antistatique|whatsapp|maps\.google/i;
+  const mainM = html.match(/<main[\s\S]*?<\/main>/i);
+  const main = mainM ? mainM[0] : html;
+  let externalLink = '';
+  for (const m of main.matchAll(/href="(https?:\/\/[^"]+)"/g)) {
+    const u = m[1];
+    if (!/chateau-grandson\.ch/.test(u) && !social.test(u)) { externalLink = u; break; }
+  }
+  return { description, tarifs, externalLink };
+}
+
+// Build one normalized event per date occurrence (multi-date labels expand to N).
+function grandsonChateauEventsFromListing(l, detail = {}) {
+  const occurrences = parseGrandsonChateauDates(l.dateText);
+  if (!occurrences.length) return [];
+  const { startTime, endTime } = parseGrandsonChateauTime(l.timeText);
+  const tags = l.tags || [];
+  const isAge = (t) => /d[èe]s\s*\d+\s*ans|tout public|alles publikum/i.test(t);
+  const freeTag = tags.some(t => /^gratuit$/i.test(t));
+  const ageTag = tags.find(isAge) || '';
+  const categoryTags = tags.filter(t => !/^gratuit$/i.test(t) && !isAge(t));
+  const free = freeTag || /gratuit|entr[ée]e libre/i.test(detail.tarifs || '');
+  const priceText = free ? 'Gratuit' : clean(detail.tarifs || '');
+  const officialSources = uniqBy([l.url, detail.externalLink].filter(Boolean), x => x);
+  const venue = 'Château de Grandson';
+  return occurrences.map((occ) => {
+    const multiDay = !!occ.endDate;
+    const startDate = multiDay ? occ.startDate : isoDateZurich(occ.startDate, startTime);
+    const endDate = multiDay ? occ.endDate : (endTime ? isoDateZurich(occ.startDate, endTime) : null);
+    const hay = `${l.title} ${detail.description || ''} ${categoryTags.join(' ')}`;
+    const familyLike = !!ageTag || /famille|enfants?|atelier|initiation|conte|spectacle|m[ée]di[ée]val|chevalier|visite|d[ée]couverte|jeu/i.test(hay);
+    return normalizeEvent({
+      source: 'grandsonChateau', title: l.title, startDate, endDate,
+      locationName: venue,
+      locationText: `${venue}, Place du Château 1, 1422 Grandson`,
+      city: 'Grandson',
+      url: l.url,
+      description: detail.description || l.title,
+      ageText: ageTag || (familyLike ? 'tout public / famille' : ''),
+      priceText,
+      tags: inferTags(`${hay} château médiéval patrimoine famille Grandson ${categoryTags.join(' ')}`),
+      sourceProvenance: `Château de Grandson — agenda: ${l.url}${categoryTags.length ? ` (${categoryTags.join(', ')})` : ''}`,
+      officialSources,
+      evidence: clean([l.dateText, l.timeText, categoryTags.join(', '), ageTag, priceText, detail.description].filter(Boolean).join(' | ')).slice(0, 1200)
+    });
+  });
+}
+
+async function scrapeGrandsonChateau() {
+  const base = SOURCES.grandsonChateau.url;
+  let listings = [];
+  try {
+    listings = extractGrandsonChateauListings(fetchGrandsonChateauHtml(base, 25000));
+    // Defensive pagination (the site currently lists all upcoming events on page 1).
+    for (let page = 2; page <= 4; page++) {
+      let more = [];
+      try { more = extractGrandsonChateauListings(fetchGrandsonChateauHtml(`${SOURCES.grandsonChateau.baseUrl}/agenda/page/${page}/`, 20000)); } catch { break; }
+      const before = listings.length;
+      listings = uniqBy([...listings, ...more], x => x.url);
+      if (listings.length === before) break;
+    }
+  } catch (e) {
+    return [{ source: 'grandsonChateau', title: 'Château de Grandson — agenda', url: base, error: e.message }];
+  }
+  const events = [];
+  const batchSize = 6;
+  for (let i = 0; i < listings.length; i += batchSize) {
+    const batch = listings.slice(i, i + batchSize);
+    const parsed = batch.map((l) => {
+      let detail = { description: '', tarifs: '', externalLink: '' };
+      try { detail = parseGrandsonChateauDetail(fetchGrandsonChateauHtml(l.url, 15000)); } catch { /* listing-level fallback */ }
+      return grandsonChateauEventsFromListing(l, detail);
+    });
+    for (const arr of parsed) events.push(...arr);
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const upcoming = events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today);
+  return uniqBy(upcoming, e => recommendationKey(e));
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -4419,7 +4614,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -4956,6 +5151,61 @@ async function runFixtureTests() {
   assert.strictEqual(estimateDistanceKm(j3lEvent), 15, 'J3L Cheyres should resolve a short distance from Yverdon');
   assert.strictEqual(j3lIsoDate('2026-09-05'), '2026-09-05');
   assert.strictEqual(j3lIsoDate('bogus'), null);
+  // --- Château de Grandson ---------------------------------------------------
+  assert.deepStrictEqual(parseGrandsonChateauDates('Samedi 8 et dimanche 9 août 2026'), [{ startDate: '2026-08-08', endDate: '2026-08-09' }], 'Grandson château contiguous weekend -> multi-day range');
+  assert.deepStrictEqual(parseGrandsonChateauDates('12, 16, 19 et 23 août 2026'), [
+    { startDate: '2026-08-12', endDate: null }, { startDate: '2026-08-16', endDate: null },
+    { startDate: '2026-08-19', endDate: null }, { startDate: '2026-08-23', endDate: null }
+  ], 'Grandson château discrete list -> one event per date');
+  assert.deepStrictEqual(parseGrandsonChateauDates('Dimanche 1er novembre 2026'), [{ startDate: '2026-11-01', endDate: null }], 'Grandson château single "1er" date');
+  assert.deepStrictEqual(parseGrandsonChateauDates('Du 30 août au 2 septembre 2026'), [{ startDate: '2026-08-30', endDate: '2026-09-02' }], 'Grandson château cross-month range');
+  assert.deepStrictEqual(parseGrandsonChateauTime('13h30 - 17h00'), { startTime: '13:30', endTime: '17:00' }, 'Grandson château time range');
+  assert.deepStrictEqual(parseGrandsonChateauTime('14h00'), { startTime: '14:00', endTime: '' }, 'Grandson château single time');
+  const gcListings = extractGrandsonChateauListings(
+    '<div class="pb-4 border-b border-neutral-200 md:grid grid-cols-[1fr_2fr_1fr] gap-x-5">'
+    + '<a href="https://chateau-grandson.ch/agenda/mon-armoirie-a-moi/" class="block overflow-hidden row-span-2 w-full aspect-3/2"><img></a>'
+    + '<a href="https://chateau-grandson.ch/agenda/mon-armoirie-a-moi/" class="text-xl font-medium no-underline">Mon armoirie à moi</a>'
+    + '<div class="row-span-2 text-base"><div class="flex flex-col gap-y-4"><div><div class="flex gap-x-2 items-center">'
+    + '<div class="font-medium">12, 16, 19 et 23 août 2026</div>'
+    + '<div class="relative group/tooltip"><div class="text-xs font-medium"><div>12, 16, 19 et 23 août 2026</div></div></div></div></div>'
+    + '<div>13h30 - 17h00</div></div>'
+    + '<div class="space-y-2 text-sm"><div class="flex flex-wrap gap-2">'
+    + '<div class="px-2 py-1 bg-neutral-100">Initiation</div><div class="px-2 py-1 bg-neutral-100">Tout public</div></div></div></div></div>'
+    + '<div class="pb-4 border-b border-neutral-200 md:grid grid-cols-[1fr_2fr_1fr] gap-x-5">'
+    + '<a href="https://chateau-grandson.ch/agenda/visite-guidee-du-mois-4/" class="text-xl font-medium no-underline">Visite guidée du mois</a>'
+    + '<div class="row-span-2 text-base"><div><div class="font-medium">Dimanche 6 septembre 2026</div></div><div>14h00</div>'
+    + '<div class="space-y-2 text-sm"><div class="flex flex-wrap gap-2">'
+    + '<div class="px-2 py-1 bg-neutral-100">Gratuit</div><div class="px-2 py-1 bg-neutral-100">Visite</div>'
+    + '<div class="px-2 py-1 bg-neutral-100">Dès 10 ans</div></div></div></div></div>'
+  );
+  assert.strictEqual(gcListings.length, 2, 'Grandson château should extract both cards');
+  assert.strictEqual(gcListings[0].title, 'Mon armoirie à moi');
+  assert.strictEqual(gcListings[0].dateText, '12, 16, 19 et 23 août 2026', 'Grandson château should read the main date (not the tooltip)');
+  assert.strictEqual(gcListings[0].timeText, '13h30 - 17h00');
+  assert.deepStrictEqual(gcListings[0].tags, ['Initiation', 'Tout public']);
+  assert.ok(gcListings[1].url.endsWith('/agenda/visite-guidee-du-mois-4/'), 'Grandson château should keep the stable detail URL');
+  const gcDetail = parseGrandsonChateauDetail(
+    '<html><head><script type="application/ld+json" class="yoast-schema-graph">{"@context":"https://schema.org","@graph":[{"@type":"WebPage","description":"Un atelier héraldique pour créer son propre blason au château.","breadcrumb":{}}]}</script></head>'
+    + '<main><div><h2>Informations pratiques</h2><div><div><div>Date</div><div>Dimanche 6 septembre 2026</div></div>'
+    + '<div><div>Tarifs</div><div>Gratuit</div></div></div></div>'
+    + '<a href="https://www.aacg.ch/atelier">Billetterie</a><a href="https://www.instagram.com/chateau_de_grandson/">insta</a></main></html>'
+  );
+  assert.strictEqual(gcDetail.description, 'Un atelier héraldique pour créer son propre blason au château.', 'Grandson château should read the Yoast description');
+  assert.strictEqual(gcDetail.tarifs, 'Gratuit', 'Grandson château should read the Tarifs value');
+  assert.strictEqual(gcDetail.externalLink, 'https://www.aacg.ch/atelier', 'Grandson château should keep the first non-social external link');
+  const gcEvents = grandsonChateauEventsFromListing(gcListings[0], gcDetail);
+  assert.strictEqual(gcEvents.length, 4, 'Grandson château multi-date workshop should expand to 4 occurrences');
+  assert.strictEqual(gcEvents[0].source, 'grandsonChateau');
+  assert.strictEqual(gcEvents[0].startDate, '2026-08-12T13:30:00+02:00', 'Grandson château should apply the DST-aware local start time');
+  assert.strictEqual(gcEvents[0].endDate, '2026-08-12T17:00:00+02:00', 'Grandson château should apply the end time to the same day');
+  assert.strictEqual(gcEvents[0].city, 'Grandson');
+  assert.strictEqual(gcEvents[0].priceText, 'Gratuit', 'Grandson château should mark the free workshop');
+  assert(gcEvents[0].officialSources.some(u => /aacg\.ch/.test(u)), 'Grandson château should keep the external billetterie link');
+  assert.strictEqual(estimateDistanceKm(gcEvents[0]), 5, 'Grandson château should resolve the Grandson distance from Yverdon');
+  const gcWeekend = grandsonChateauEventsFromListing({ url: 'https://chateau-grandson.ch/agenda/fete-medievale/', title: 'Fête Médiévale', dateText: 'Samedi 8 et dimanche 9 août 2026', timeText: '', tags: ['Initiation', 'Spectacle', 'Tout public'] }, {});
+  assert.strictEqual(gcWeekend.length, 1, 'Grandson château weekend festival should stay a single multi-day event');
+  assert.strictEqual(gcWeekend[0].startDate, '2026-08-08');
+  assert.strictEqual(gcWeekend[0].endDate, '2026-08-09', 'Grandson château weekend keeps the multi-day end date');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -5132,4 +5382,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau };
