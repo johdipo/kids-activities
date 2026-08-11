@@ -440,6 +440,25 @@ const SOURCES = {
     baseUrl: 'https://chateau-grandson.ch',
     kind: 'wordpress-castle-family-heritage-agenda'
   },
+  maisonAilleurs: {
+    // Maison d'Ailleurs — musée de la science-fiction, de l'utopie et des voyages
+    // extraordinaires (Place Pestalozzi 14, Yverdon-les-Bains, ~0 km). Institution
+    // familiale phare d'Yverdon avec une vraie programmation « ATELIER KIDS » (BD,
+    // création, crea-lab en libre-service l'été), des soirées immersives (Horror Night),
+    // vernissages/expos et journées anniversaire familiales → fort ancrage science /
+    // culture / découverte pour Andy & famille, distinct de toutes les sources agenda
+    // touristiques (n'y figure pas). Plateforme WordPress: le custom post type
+    // `activites` est exposé proprement en clair via l'API REST
+    // `/wp-json/wp/v2/activites`. Les champs ACF ne passent pas par REST, mais chaque
+    // activité porte sa date dans le SLUG (`<titre>-JJ-MM-AAAA`, ou range même mois
+    // `<titre>-J1-J2-MM-AAAA`) — anchor déterministe — et le corps HTML porte les lignes
+    // structurées date FR / horaire (« 14h-16h », « Départ à 19h30 ») / public (« Enfants
+    // dès 8 ans », « Tout public ») / prix (« CHF 20.- par enfant », « Accès libre »).
+    // Le corps sert à enrichir horaire/âge/prix; le slug fait foi pour la date.
+    url: 'https://ailleurs.ch/wp-json/wp/v2/activites?per_page=100&_fields=slug,link,title,content,type_activites',
+    baseUrl: 'https://ailleurs.ch',
+    kind: 'wordpress-rest-museum-family-activities-yverdon'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -4266,6 +4285,130 @@ async function scrapeCastrum() {
   return uniqBy(events, e => recommendationKey(e));
 }
 
+function fetchMaisonAilleursData(url, maxTime = 25) {
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 24 * 1024 * 1024 });
+}
+
+// Maison d'Ailleurs stores each activity's date in its slug, which is the only
+// deterministic machine-readable date on the record (ACF date fields are not exposed
+// via REST). Two shapes exist, both trailing the slug: single day `<title>-JJ-MM-AAAA`
+// and same-month range `<title>-J1-J2-MM-AAAA` (e.g. `50-ans-musee-2-3-05-2026`). The
+// range shape is tested first, but only accepted when its month segment is a valid month
+// (<=12) so a title ending in a number can't be mis-read as a 4th date token.
+function parseMaisonAilleursSlugDate(slug) {
+  const s = String(slug || '');
+  const range = s.match(/-(\d{1,2})-(\d{1,2})-(\d{1,2})-(20\d{2})$/);
+  if (range) {
+    const d1 = +range[1], d2 = +range[2], mm = +range[3], yyyy = +range[4];
+    if (mm >= 1 && mm <= 12 && d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31) {
+      const month = String(mm).padStart(2, '0');
+      const start = `${yyyy}-${month}-${String(d1).padStart(2, '0')}`;
+      const end = `${yyyy}-${month}-${String(d2).padStart(2, '0')}`;
+      return { startDate: start, endDate: end !== start ? end : null };
+    }
+  }
+  const single = s.match(/-(\d{1,2})-(\d{1,2})-(20\d{2})$/);
+  if (single) {
+    const dd = +single[1], mm = +single[2], yyyy = +single[3];
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return { startDate: `${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`, endDate: null };
+    }
+  }
+  return null;
+}
+
+// Reduce a REST content.rendered blob to the human lead, dropping the Gravity/booking
+// form boilerplate that trails many activity pages ("Sur inscription", "« * » indique
+// les champs nécessaires", the country <select>, etc.). The structured date/horaire/
+// public/prix lines all sit in this lead.
+function maisonAilleursLead(contentHtml) {
+  let text = htmlToText(contentHtml || '');
+  for (const cut of ['Sur inscription', '« * » indique', 'indique les champs', 'Inscription inscription', 'Nom de l’activité', "Nom de l'activité"]) {
+    const i = text.indexOf(cut);
+    if (i > 0) text = text.slice(0, i);
+  }
+  return clean(text);
+}
+
+function maisonAilleursTime(lead) {
+  // "14h-16h" / "Départ à 19h30, 20h30 ou 21h30" / "dès 14h00" → first HHh(MM) token.
+  return parseTime(lead) ? parseTime(lead).slice(0, 5) : '';
+}
+
+function maisonAilleursPrice(lead) {
+  const chf = lead.match(/CHF\s*\d+[.\-\d]*\s*(?:\.-)?\s*(?:par\s+(?:enfant|personne|famille|adulte)|\/[^.]*)?/i);
+  if (chf) return clean(chf[0]);
+  if (/acc[èe]s\s+libre/i.test(lead)) return 'Accès libre (visiteurs du musée)';
+  if (/gratuit|entr[ée]e\s+libre/i.test(lead)) return 'Gratuit';
+  return '';
+}
+
+function maisonAilleursAgeText(lead) {
+  const m = lead.match(/(?:enfants?\s+)?d[èe]s\s+\d{1,2}\s*ans(?:\s*(?:&|et)\s*familles?)?/i)
+    || lead.match(/\d{1,2}\s*(?:-|à)\s*\d{1,2}\s*ans/i)
+    || lead.match(/tout\s+public/i);
+  return m ? clean(m[0]) : '';
+}
+
+function maisonAilleursEventFromRecord(rec) {
+  const title = clean(htmlToText(rec.title && rec.title.rendered || ''));
+  const slug = clean(rec.slug || '');
+  const link = clean(rec.link || `${SOURCES.maisonAilleurs.baseUrl}/activites/${slug}/`);
+  if (!title || !slug) return null;
+  const slugDate = parseMaisonAilleursSlugDate(slug);
+  const lead = maisonAilleursLead(rec.content && rec.content.rendered || '');
+  // Slug is authoritative for the day; fall back to a French date in the lead only when
+  // the slug carries none (e.g. evergreen slugs like `crea-lab-ete-2026`).
+  let startDay = slugDate && slugDate.startDate;
+  let endDay = slugDate && slugDate.endDate;
+  if (!startDay) {
+    const contentDate = parseFrenchDate(lead);
+    if (!contentDate) return null; // no concrete date → skip (evergreen/recurring pass)
+    startDay = contentDate;
+    endDay = null;
+  }
+  const time = maisonAilleursTime(lead);
+  const ageText = maisonAilleursAgeText(lead);
+  const priceText = maisonAilleursPrice(lead);
+  const isKids = /atelier\s+kids/i.test(lead) || /enfants?\s+d[èe]s/i.test(lead);
+  const startDate = isoDateZurich(startDay, time);
+  const endDate = endDay && endDay !== startDay ? endDay : null;
+  const description = clean(`${lead.slice(0, 480)}${isKids ? '' : ''}`) ||
+    'Activité à la Maison d’Ailleurs (musée de la science-fiction, Yverdon-les-Bains).';
+  return normalizeEvent({
+    source: 'maisonAilleurs',
+    title: `${title} (Maison d’Ailleurs)`,
+    startDate,
+    endDate,
+    locationName: 'Maison d’Ailleurs',
+    locationText: 'Maison d’Ailleurs, Place Pestalozzi 14, Yverdon-les-Bains',
+    city: 'Yverdon-les-Bains',
+    url: link,
+    description,
+    ageText: ageText || (isKids ? 'enfants / famille' : ''),
+    priceText,
+    tags: inferTags(`${isKids ? 'atelier enfants famille ' : ''}science-fiction musée exposition découverte culture atelier ${title} ${lead}`),
+    sourceProvenance: `Maison d’Ailleurs — activités: ${link}`,
+    officialSources: [link, `${SOURCES.maisonAilleurs.baseUrl}/activites/`],
+    evidence: clean(`${title} | slug:${slug} | ${startDay}${endDay ? ` → ${endDay}` : ''}${time ? ` ${time}` : ''} | ${ageText || (isKids ? 'ATELIER KIDS' : 'tout public')} | ${priceText || 'prix n/c'}`).slice(0, 1200)
+  });
+}
+
+async function scrapeMaisonAilleurs() {
+  let records = [];
+  try {
+    records = JSON.parse(fetchMaisonAilleursData(SOURCES.maisonAilleurs.url));
+  } catch (e) {
+    return [{ source: 'maisonAilleurs', title: 'Maison d’Ailleurs — activités', url: SOURCES.maisonAilleurs.baseUrl, error: e.message }];
+  }
+  if (!Array.isArray(records)) return [];
+  const today = new Date().toISOString().slice(0, 10);
+  const events = records
+    .map(maisonAilleursEventFromRecord)
+    .filter(e => e && e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today);
+  return uniqBy(events, e => recommendationKey(e));
+}
+
 // --- Jura & Trois-Lacs (J3L) — agenda régional géo-restreint -------------------
 // MyCity Tourism agenda: the page embeds a GeoJSON FeatureCollection in a
 // `<script id="list-data" type="application/json">` blob (~1600 events). Each
@@ -4614,7 +4757,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -5206,6 +5349,33 @@ async function runFixtureTests() {
   assert.strictEqual(gcWeekend.length, 1, 'Grandson château weekend festival should stay a single multi-day event');
   assert.strictEqual(gcWeekend[0].startDate, '2026-08-08');
   assert.strictEqual(gcWeekend[0].endDate, '2026-08-09', 'Grandson château weekend keeps the multi-day end date');
+  // Maison d'Ailleurs (WordPress REST `activites`): the date lives in the slug — single
+  // day `<title>-JJ-MM-AAAA` and same-month range `<title>-J1-J2-MM-AAAA` — while the
+  // body enriches horaire/public/prix. The range shape must win over the single shape
+  // and a title-trailing number must not be misread as a date token.
+  assert.deepStrictEqual(parseMaisonAilleursSlugDate('monstres-en-bd-21-10-2026'), { startDate: '2026-10-21', endDate: null }, 'Maison d’Ailleurs single-day slug');
+  assert.deepStrictEqual(parseMaisonAilleursSlugDate('50-ans-musee-2-3-05-2026'), { startDate: '2026-05-02', endDate: '2026-05-03' }, 'Maison d’Ailleurs same-month range slug (range wins over single)');
+  assert.strictEqual(parseMaisonAilleursSlugDate('crea-lab-ete-2026'), null, 'Maison d’Ailleurs evergreen slug has no parseable date');
+  assert.strictEqual(parseMaisonAilleursSlugDate('atelier-13h-99-13-2026'), null, 'Maison d’Ailleurs slug with an out-of-range month is rejected');
+  const mdaLead = maisonAilleursLead('<p>ATELIER KIDS Initie-toi aux bases de la BD. Mercredi 21 octobre 2026, 14h-16h Enfants dès 8 ans CHF 20.- par enfant</p><p>Sur inscription inscription « * » indique les champs nécessaires Nom * Prénom Afghanistan Albanie</p>');
+  assert.ok(!/Afghanistan|champs nécessaires/.test(mdaLead), 'Maison d’Ailleurs lead should drop the booking-form boilerplate');
+  assert.strictEqual(maisonAilleursTime(mdaLead), '14:00', 'Maison d’Ailleurs should read the first HHhMM start time');
+  assert.strictEqual(maisonAilleursAgeText(mdaLead), 'Enfants dès 8 ans', 'Maison d’Ailleurs should capture the "Enfants dès 8 ans" public');
+  assert.ok(/CHF\s*20/.test(maisonAilleursPrice(mdaLead)), 'Maison d’Ailleurs should capture the CHF price');
+  const mdaEvent = maisonAilleursEventFromRecord({
+    slug: 'monstres-en-bd-21-10-2026',
+    link: 'https://ailleurs.ch/activites/monstres-en-bd-21-10-2026/',
+    title: { rendered: 'Monstres en BD' },
+    content: { rendered: '<p>ATELIER KIDS crée une BD d’Halloween. Mercredi 21 octobre 2026, 14h-16h Enfants dès 8 ans CHF 20.- par enfant</p><p>Sur inscription « * » indique les champs nécessaires</p>' }
+  });
+  assert.strictEqual(mdaEvent.source, 'maisonAilleurs');
+  assert.strictEqual(mdaEvent.startDate, '2026-10-21T14:00:00+02:00', 'Maison d’Ailleurs should apply the DST-aware slug date + body time');
+  assert.strictEqual(mdaEvent.ageMin, 8, 'Maison d’Ailleurs should parse the minimum age from the body');
+  assert.strictEqual(mdaEvent.city, 'Yverdon-les-Bains');
+  assert.strictEqual(estimateDistanceKm(mdaEvent), 0, 'Maison d’Ailleurs (Yverdon centre) should resolve to 0 km');
+  assert.ok(mdaEvent.tags.includes('science') || mdaEvent.tags.includes('culture'), 'Maison d’Ailleurs should carry a science/culture tag');
+  const mdaEvergreen = maisonAilleursEventFromRecord({ slug: 'crea-lab-ete-2026', link: 'https://ailleurs.ch/activites/crea-lab-ete-2026/', title: { rendered: 'Le Crea-lab' }, content: { rendered: '<p>ATELIER KIDS Tous les dimanches des vacances d’été Enfants dès 6 ans</p>' } });
+  assert.strictEqual(mdaEvergreen, null, 'Maison d’Ailleurs evergreen/recurring activity without a concrete date is skipped');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -5382,4 +5552,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau };
