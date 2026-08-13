@@ -63,6 +63,11 @@ const LOCATION_KM_FROM_YVERDON = {
   'le sentier': 42,
   'le chenit': 45,
   'le brassus': 48,
+  // Vallée de Joux Tourisme localities (Lac de Joux / Jura vaudois) not already listed
+  'le lieu': 40,
+  'le solliat': 44,
+  'l\'orient': 44,
+  'les esserts-de-rive': 40,
   'saint-cergue': 60,
   'saint cergue': 60,
   'st-cergue': 60,
@@ -249,6 +254,19 @@ const SOURCES = {
     apiUrl: 'https://www.avenches.ch/fr/Z14820?_format=json',
     baseUrl: 'https://www.avenches.ch',
     kind: 'mycity-tourism-broye-events-agenda'
+  },
+  valleeDeJoux: {
+    url: 'https://www.myvalleedejoux.ch/fr/Z14737/agenda-des-evenements',
+    // Vallée de Joux Tourisme runs on the same MyCity Tourism CMS as `avenches`
+    // (Z-code page ids, React app). The full agenda is exposed as JSON via the
+    // `?_format=json` variant of the agenda page id; one request returns the whole
+    // upcoming list (`end: "end"`), so no pagination is needed. Same event shape as
+    // avenches (`dates.start`/`dates.end` in YYYY/MM/DD, `location` town string,
+    // `categories[].label`). Time/price/age live only on the P-code detail pages,
+    // so they are filled by the generic conditional-enrichment layer.
+    apiUrl: 'https://www.myvalleedejoux.ch/fr/Z14737?_format=json',
+    baseUrl: 'https://www.myvalleedejoux.ch',
+    kind: 'mycity-tourism-vallee-de-joux-events-agenda'
   },
   fribourgTerroir: {
     url: 'https://fribourg.ch/fr/terroir-fribourg/agenda/',
@@ -3038,6 +3056,75 @@ async function scrapeAvenches() {
   return uniqBy(events, e => e.url || e.id);
 }
 
+// --- Vallée de Joux Tourisme — Lac de Joux / Jura vaudois (MyCity JSON) -------
+// Same MyCity Tourism CMS as `avenches`: the agenda page id has a `?_format=json`
+// variant returning the whole upcoming list in one request. The listing carries
+// title, `dates.start`/`dates.end` (YYYY/MM/DD), a `location` town string and
+// `categories[].label`; horaire/prix/âge live on the P-code detail pages and are
+// filled by the generic conditional-enrichment layer. Strong La Dérivée / terroir /
+// plein-air / lac fit: repas & buvettes d'alpage, raclette parties, marchés, fêtes
+// de village, festivals, Fête du Vacherin Mont-d'Or, concerts en plein air.
+function parseValleeDeJouxEvent(raw, opts = {}) {
+  const base = opts.baseUrl || SOURCES.valleeDeJoux.baseUrl;
+  const startDate = avenchesDateToIso(raw?.dates?.start);
+  const endIso = avenchesDateToIso(raw?.dates?.end);
+  const endDate = endIso && endIso !== startDate ? endIso : null;
+  const categories = (raw.categories || []).map(c => clean(c && c.label)).filter(Boolean);
+  const types = (raw.types || []).map(t => clean(t && t.label)).filter(Boolean);
+  const catText = [...new Set([...categories, ...types])].join(', ');
+  const location = clean(raw.location || '');
+  const url = canonicalUrl(raw.url, base);
+  const title = clean(raw.title);
+  const description = clean(raw.description);
+  const ageText = /famille|enfant|jeune public|tout public/i.test(`${title} ${description} ${catText}`)
+    ? 'famille / tout public mentionné'
+    : '';
+  const priceText = /gratuit|entr[ée]e libre|offert/i.test(`${title} ${description}`) ? 'Gratuit (à confirmer)' : '';
+  const tags = inferTags(`${title} ${description} ${catText}`);
+  return normalizeEvent({
+    source: 'valleeDeJoux',
+    title,
+    startDate,
+    endDate,
+    locationName: location,
+    locationText: location,
+    city: location || cityFromLocation(location, 'Vallée de Joux'),
+    url,
+    description,
+    ageText,
+    priceText,
+    tags,
+    officialSources: [url].filter(Boolean),
+    sourceProvenance: 'Vallée de Joux Tourisme (MyCity) — agenda des événements Lac de Joux / Jura vaudois via _format=json',
+    evidence: clean([
+      title,
+      startDate && `début ${startDate}`,
+      endDate && `fin ${endDate}`,
+      location && `lieu ${location}`,
+      catText && `catégories ${catText}`,
+      description
+    ].filter(Boolean).join(' | '))
+  });
+}
+
+async function scrapeValleeDeJoux() {
+  let payload;
+  try {
+    payload = await fetchEmoiJson(SOURCES.valleeDeJoux.apiUrl, 30000);
+  } catch (e) {
+    return [{ source: 'valleeDeJoux', title: 'Vallée de Joux agenda', url: SOURCES.valleeDeJoux.url, error: e.message }];
+  }
+  const data = Array.isArray(payload && payload.data) ? payload.data : [];
+  const events = [];
+  for (const raw of data) {
+    if (!raw || !raw.title) continue;
+    const ev = parseValleeDeJouxEvent(raw, { baseUrl: SOURCES.valleeDeJoux.baseUrl });
+    if (!ev.startDate) continue;
+    events.push(ev);
+  }
+  return uniqBy(events, e => e.url || e.id);
+}
+
 // --- FribourgRégion / Terroir Fribourg — Broye & Lac de Morat (WP REST) -------
 // fribourg.ch (ex fribourgregion.ch) exposes an `event` post type on its public
 // WP REST API. The canton-wide list is 845 events, so we scope by the `region`
@@ -4919,7 +5006,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -5103,6 +5190,17 @@ async function runFixtureTests() {
   const avenchesSingleDay = parseAvenchesEvent({ title: 'SUP Suisse Flatwater Championship 2026', description: 'Compétition', url: '/fr/P187973/sup', location: 'Morat', categories: [{ label: 'Sport', value: 'c-342' }], types: [], dates: { start: '2026/06/27', end: '2026/06/27' } });
   assert.strictEqual(avenchesSingleDay.endDate, null, 'Avenches single-day event should not duplicate start as endDate');
   assert.strictEqual(avenchesSingleDay.city, 'Morat');
+  // Vallée de Joux Tourisme (same MyCity JSON shape, Lac de Joux / Jura vaudois).
+  const vdjEvent = parseValleeDeJouxEvent({ id: 9552965, title: "Repas à thème à l'alpage des Amburnex", description: 'Vente directe et petite restauration', url: '/fr/P225083/repas-a-theme-a-l-alpage-des-amburnex', location: 'Le Brassus', categories: [{ label: 'Gastronomie & vin', value: 'c-15' }], dates: { start: '2026/08/13' } });
+  assert.strictEqual(vdjEvent.source, 'valleeDeJoux');
+  assert.strictEqual(vdjEvent.startDate, '2026-08-13');
+  assert.strictEqual(vdjEvent.endDate, null, 'Vallée de Joux single-day event should not duplicate start as endDate');
+  assert.strictEqual(vdjEvent.city, 'Le Brassus');
+  assert.strictEqual(vdjEvent.url, 'https://www.myvalleedejoux.ch/fr/P225083/repas-a-theme-a-l-alpage-des-amburnex');
+  assert.strictEqual(estimateDistanceKm(vdjEvent), 48, 'Le Brassus should resolve to its Vallée de Joux distance');
+  const vdjRange = parseValleeDeJouxEvent({ title: 'Hockeyades Vallée de Joux', description: 'Tournoi', url: '/fr/P14673/hockeyades', location: 'Le Sentier', categories: [{ label: 'Sport', value: 'c-167' }], dates: { start: '2026/08/12', end: '2026/08/14' } });
+  assert.strictEqual(vdjRange.endDate, '2026-08-14', 'Vallée de Joux multi-day event should keep endDate');
+  assert.strictEqual(estimateDistanceKm(parseValleeDeJouxEvent({ title: 'x', url: '/fr/P1/x', location: 'Le Lieu', dates: { start: '2026/09/01' } })), 40, 'Le Lieu distance should be registered');
   // FribourgRégion / Terroir Fribourg (Broye + Lac de Morat WP REST source).
   assert.deepStrictEqual(parseFribourgHoraire('Du 10 au 26 juil. 2026'), { startDate: '2026-07-10', endDate: '2026-07-26' });
   assert.deepStrictEqual(parseFribourgHoraire('Du 8 juin au 16 août 2026'), { startDate: '2026-06-08', endDate: '2026-08-16' });
@@ -5754,4 +5852,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon };
