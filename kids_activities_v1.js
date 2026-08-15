@@ -518,6 +518,25 @@ const SOURCES = {
     baseUrl: 'https://bibliotheque.yverdon.ch',
     kind: 'typo3-news-library-agenda-yverdon'
   },
+  sunsetJazz: {
+    // Festival « Sunset Jazz » d'Estavayer-le-Lac (Broye / Lac de Neuchâtel,
+    // ~22 km d'Yverdon) : jazz de rue estival dans le Bourg médiéval, organisé
+    // par le Comité de cafetiers-restaurateurs du Bourg avec la Commune —
+    // 2 soirées + une matinée, 5 lieux emblématiques (rues et places de la
+    // vieille ville), 8 groupes, concerts plein air, ambiance festive et
+    // conviviale, accès libre. Fort fit famille / plein-air / La Dérivée.
+    // Saisonnier (été) : la page programme est réutilisée d'une édition à
+    // l'autre, l'intérêt est de capter les prochaines éditions. DISTINCT de
+    // `fribourgTerroir` (agenda DMO cantonal) : c'est la page programme propre
+    // de la Commune (`estavayer.ch`, TYPO3) qui porte le détail heure/lieu/
+    // groupe par jour. Structure statique : section <h1>Programmation</h1>, une
+    // colonne `.col-md-4` par jour avec un <h3>Jour DD mois AAAA</h3> et un
+    // accordéon dont chaque `.accordion-item` porte le lieu (bouton) et le
+    // créneau « HH:MM - HH:MM: Artiste » (corps). Une requête HTML, pas d'API.
+    url: 'https://www.estavayer.ch/culture-loisirs-sports/manifestations/programmation-sunset-jazz',
+    baseUrl: 'https://www.estavayer.ch',
+    kind: 'typo3-static-festival-programme-estavayer'
+  },
   manualJohan: {
     url: 'manual://johan/kids-activities',
     kind: 'local-human-curated-source',
@@ -1838,6 +1857,75 @@ async function scrapeChampvent() {
 }
 
 
+// --- Estavayer-le-Lac « Sunset Jazz » -----------------------------------------
+// One event per festival day. Each day is its own `.col-md-4` column carrying a
+// dated <h3> and an accordion whose items map a venue (button) to a « HH:MM -
+// HH:MM: Artiste » line (body). Headers that don't parse to a French date (e.g.
+// the closing « Le Comité de cafetiers-restaurateurs ») are skipped.
+function extractSunsetJazzDays(html, pageUrl = SOURCES.sunsetJazz.url) {
+  const $ = cheerio.load(html);
+  const days = [];
+  $('h3').each((_, h) => {
+    const dateText = clean($(h).text());
+    const startDate = parseFrenchDate(dateText);
+    if (!startDate) return;
+    // The day's programme lives in the same column container as its <h3>.
+    const column = $(h).closest('.col-md-4, .col-md-6, .col-md-3, .col-md-12');
+    const scope = column.length ? column : $(h).parent();
+    const acts = [];
+    scope.find('.accordion-item').each((__, item) => {
+      const venue = clean($(item).find('.accordion-button, .accordion-header').first().text());
+      $(item).find('.accordion-body').each((___, body) => {
+        const line = clean($(body).text());
+        if (line) acts.push({ venue, line });
+      });
+    });
+    if (acts.length) days.push({ dateText, startDate, acts });
+  });
+  return uniqBy(days, d => d.startDate);
+}
+
+function sunsetJazzEventFromDay(day, pageUrl = SOURCES.sunsetJazz.url) {
+  let earliest = null;
+  for (const a of day.acts) {
+    const m = a.line.match(/(\d{1,2}):(\d{2})/);
+    if (!m) continue;
+    const hhmm = `${m[1].padStart(2, '0')}:${m[2]}`;
+    if (!earliest || hhmm < earliest) earliest = hhmm;
+  }
+  const startDate = earliest ? isoDateZurich(day.startDate, earliest) : day.startDate;
+  const programme = day.acts.map(a => clean(`${a.venue} — ${a.line}`)).join(' ; ');
+  return normalizeEvent({
+    source: 'sunsetJazz',
+    title: `Sunset Jazz Estavayer-le-Lac — ${day.dateText}`,
+    startDate,
+    endDate: null,
+    locationName: 'Le Bourg (vieille ville)',
+    locationText: 'Le Bourg (rues et places de la vieille ville), Estavayer-le-Lac',
+    city: 'Estavayer-le-Lac',
+    url: `${pageUrl}#${day.startDate}`,
+    description: clean([
+      "Festival Sunset Jazz — concerts de jazz de rue en plein air dans le Bourg médiéval d'Estavayer-le-Lac (Broye / Lac de Neuchâtel).",
+      'Organisé par le Comité de cafetiers-restaurateurs du Bourg avec la Commune : plusieurs scènes dans les rues et places emblématiques, spectacle plein air, ambiance festive et conviviale, accès libre.',
+      `Programme du jour : ${programme}.`
+    ].join(' ')).slice(0, 700),
+    ageText: 'tout public / famille',
+    priceText: 'Accès libre (concerts de rue dans le Bourg)',
+    tags: inferTags('festival spectacle concert musique jazz plein air rue vieille ville estavayer lac famille convivial'),
+    sourceProvenance: `Commune d'Estavayer-le-Lac – programmation Sunset Jazz: ${pageUrl}`,
+    officialSources: [pageUrl],
+    evidence: clean(`${day.dateText} | ${programme}`).slice(0, 1200)
+  });
+}
+
+async function scrapeSunsetJazz() {
+  const html = await fetchHtml(SOURCES.sunsetJazz.url, 30000);
+  const days = extractSunsetJazzDays(html);
+  const today = new Date().toISOString().slice(0, 10);
+  const events = days.map(d => sunsetJazzEventFromDay(d))
+    .filter(e => e.title && e.startDate && e.startDate.slice(0, 10) >= today);
+  return uniqBy(events, e => recommendationKey(e));
+}
 
 
 function fetchEchallensHtml(url, timeoutMs = 30000) {
@@ -5167,7 +5255,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -5880,6 +5968,30 @@ async function runFixtureTests() {
   assert.strictEqual(bplChampPittet.startDate, '2026-08-27', 'Bibliothèque multi-day range stays date-level');
   assert.strictEqual(bplChampPittet.endDate, '2026-08-30');
   assert.strictEqual(estimateDistanceKm(bplChampPittet), 5, 'Bibliothèque Champ-Pittet event resolves to 5 km');
+  const sunsetJazzHtml = '<div class="c-1"><header><h1>Programmation</h1></header><div class="row">'
+    + '<div class="col-md-4"><div class="c-2"><header><h3>Vendredi 10 juillet 2026</h3></header><div class="row"><div class="col-md-12"><div id="accordion2" class="accordion">'
+    + '<div class="accordion-item"><h2 class="accordion-header"><button class="accordion-button">Rue de l\'Hôtel de Ville</button></h2><div class="accordion-collapse"><div class="accordion-body"><p><strong>20:00 - 22:30: Julien Lemoine\'s - Lost in Swing</strong></p></div></div></div>'
+    + '<div class="accordion-item"><h2 class="accordion-header"><button class="accordion-button">Dans les rues d\'Estavayer-le-Lac</button></h2><div class="accordion-collapse"><div class="accordion-body"><p><strong>18:30 - 21:10: Mobile Dixieland Band</strong></p></div></div></div>'
+    + '</div></div></div></div></div>'
+    + '<div class="col-md-4"><div class="c-3"><header><h3>Dimanche 12 juillet 2026</h3></header><div class="row"><div class="col-md-12"><div id="accordion3" class="accordion">'
+    + '<div class="accordion-item"><h2 class="accordion-header"><button class="accordion-button">Grand-Rue</button></h2><div class="accordion-collapse"><div class="accordion-body"><p><strong>10:30 - 12:30: Larry Franco &amp; Dee Dee Joy</strong></p></div></div></div>'
+    + '</div></div></div></div></div>'
+    + '<div class="col-md-4"><div class="c-4"><header><h3>Le Comité de cafetiers-restaurateurs</h3></header></div></div>'
+    + '</div></div>';
+  const sunsetJazzDays = extractSunsetJazzDays(sunsetJazzHtml);
+  assert.strictEqual(sunsetJazzDays.length, 2, 'Sunset Jazz should keep only dated day columns (non-date header skipped)');
+  assert.strictEqual(sunsetJazzDays[0].startDate, '2026-07-10');
+  assert.strictEqual(sunsetJazzDays[0].acts.length, 2, 'Sunset Jazz day should collect every venue accordion in its column');
+  const sunsetJazzEvent = sunsetJazzEventFromDay(sunsetJazzDays[0]);
+  assert.strictEqual(sunsetJazzEvent.source, 'sunsetJazz');
+  assert.strictEqual(sunsetJazzEvent.startDate, '2026-07-10T18:30:00+02:00', 'Sunset Jazz should apply the earliest DST-aware start time of the day');
+  assert.strictEqual(sunsetJazzEvent.endDate, null);
+  assert.strictEqual(sunsetJazzEvent.city, 'Estavayer-le-Lac');
+  assert(/Accès libre/i.test(sunsetJazzEvent.priceText), 'Sunset Jazz should keep the free-access evidence');
+  assert(/Mobile Dixieland Band/.test(sunsetJazzEvent.description), 'Sunset Jazz description should list the day programme');
+  assert.strictEqual(estimateDistanceKm(sunsetJazzEvent), 22, 'Sunset Jazz Estavayer-le-Lac should resolve to 22 km from Yverdon');
+  const sunsetJazzMatinee = sunsetJazzEventFromDay(sunsetJazzDays[1]);
+  assert.strictEqual(sunsetJazzMatinee.startDate, '2026-07-12T10:30:00+02:00', 'Sunset Jazz Sunday matinée keeps its morning start time');
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -6056,4 +6168,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz };
