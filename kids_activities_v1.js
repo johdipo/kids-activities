@@ -23,6 +23,7 @@ const LOCATION_KM_FROM_YVERDON = {
   orbe: 12,
   vallorbe: 23,
   champvent: 8,
+  'la sarraz': 15,
   'sainte-croix': 23,
   'cheseaux-noreaz': 5,
   'cheseaux-noréaz': 5,
@@ -536,6 +537,23 @@ const SOURCES = {
     url: 'https://www.estavayer.ch/culture-loisirs-sports/manifestations/programmation-sunset-jazz',
     baseUrl: 'https://www.estavayer.ch',
     kind: 'typo3-static-festival-programme-estavayer'
+  },
+  chateauLaSarraz: {
+    // Château de La Sarraz (La Sarraz, Jura-Nord vaudois, ~15 km d'Yverdon) :
+    // château médiéval habité + Musée du Cheval, propre programmation culturelle
+    // et familiale au coeur du bourg — concerts « Jeudis du Château » (cour /
+    // plein-air estival), Schumanniade, Salon du terroir (Balthazar Festival),
+    // fête médiévale, ateliers/visites patrimoine. Fort fit famille / patrimoine
+    // / plein-air / terroir (signal de goût Johan). DISTINCT de tout : aucune
+    // source existante ne relaie l'agenda propre du château. Plateforme : WordPress
+    // + plugin « The Events Calendar » (Tribe) qui expose une API REST publique
+    // renvoyant tout en JSON structuré (titre, dates locales Europe/Zurich via
+    // *_date_details, all_day, venue.city, cost_details, description HTML,
+    // categories/tags) — une requête, pas de scraping HTML ni d'enrichissement.
+    url: 'https://chateau-lasarraz.ch/events/',
+    apiUrl: 'https://chateau-lasarraz.ch/wp-json/tribe/events/v1/events',
+    baseUrl: 'https://chateau-lasarraz.ch',
+    kind: 'wordpress-the-events-calendar-rest-chateau-lasarraz'
   },
   manualJohan: {
     url: 'manual://johan/kids-activities',
@@ -3235,6 +3253,123 @@ async function scrapeValleeDeJoux() {
   return uniqBy(events, e => e.url || e.id);
 }
 
+// --- Château de La Sarraz — agenda propre (WordPress / The Events Calendar) ---
+// The castle runs WordPress with the "The Events Calendar" (Tribe) plugin, whose
+// public REST API returns every upcoming event as structured JSON in one call:
+// title, `start_date_details`/`end_date_details` (components already in the site
+// timezone Europe/Zurich), an `all_day` flag, `venue.city`, `cost_details`
+// (currency + values) and an HTML `description`. No HTML scraping or detail
+// enrichment is needed. Strong terroir / heritage / plein-air / famille fit and
+// distinct from every existing source (no source relays the castle's own agenda).
+function laSarrazDayFromDetails(d) {
+  if (!d || !d.year || !d.month || !d.day) return null;
+  return `${d.year}-${String(d.month).padStart(2, '0')}-${String(d.day).padStart(2, '0')}`;
+}
+
+function laSarrazPrice(raw) {
+  const cd = raw && raw.cost_details ? raw.cost_details : {};
+  const vals = Array.isArray(cd.values) ? cd.values.map(v => clean(String(v))).filter(Boolean) : [];
+  if (vals.length) {
+    const sym = clean(cd.currency_symbol || cd.currency_code || 'CHF');
+    return `${sym} ${vals.join('–')}`.trim();
+  }
+  const cost = clean(raw && raw.cost || '');
+  if (cost) return cost;
+  return '';
+}
+
+function parseLaSarrazEvent(raw, opts = {}) {
+  const base = opts.baseUrl || SOURCES.chateauLaSarraz.baseUrl;
+  const allDay = raw.all_day === true || raw.all_day === '1' || raw.all_day === 'yes';
+  const startDay = laSarrazDayFromDetails(raw.start_date_details);
+  if (!startDay) return null;
+  let endDay = laSarrazDayFromDetails(raw.end_date_details);
+  // Tribe stores all-day multi-day events with an end just past midnight of the
+  // following day (here shifted +2h → "01:59:59"): roll such an end back one day
+  // so a "4 au 6 septembre" salon ends on the 6th, not the 7th.
+  if (allDay && endDay && raw.end_date_details && Number(raw.end_date_details.hour) < 3) {
+    const dt = new Date(`${endDay}T12:00:00Z`);
+    dt.setUTCDate(dt.getUTCDate() - 1);
+    endDay = dt.toISOString().slice(0, 10);
+  }
+  let startDate;
+  let endDate = null;
+  if (allDay) {
+    startDate = startDay;
+    endDate = endDay && endDay !== startDay ? endDay : null;
+  } else {
+    const sd = raw.start_date_details || {};
+    startDate = isoDateZurich(startDay, `${sd.hour || ''}:${sd.minutes || '00'}`);
+    // Timed events spanning several calendar days keep a date-level end.
+    endDate = endDay && endDay !== startDay ? endDay : null;
+  }
+  const title = decodeHtmlEntities(raw.title || '');
+  const venue = raw.venue && typeof raw.venue === 'object' ? raw.venue : {};
+  const locationName = clean(venue.venue || 'Château de La Sarraz');
+  const city = clean(venue.city || '') || 'La Sarraz';
+  const categories = (raw.categories || []).map(c => clean(c && c.name)).filter(Boolean);
+  const tagLabels = (raw.tags || []).map(t => clean(t && t.name)).filter(Boolean);
+  const catText = [...new Set([...categories, ...tagLabels])].join(', ');
+  const description = decodeHtmlEntities(raw.description || raw.excerpt || '');
+  const url = canonicalUrl(raw.url || raw.rest_url || '', base);
+  const hay = `${title} ${description} ${catText}`;
+  const ageText = /famille|enfants?|jeune public|tout public|d[èe]s \d/i.test(hay)
+    ? 'famille / tout public mentionné'
+    : '';
+  let priceText = laSarrazPrice(raw);
+  if (!priceText && /gratuit|entr[ée]e libre|chapeau|prix libre/i.test(hay)) {
+    priceText = 'Gratuit / prix libre (à confirmer)';
+  }
+  const tags = inferTags(hay);
+  return normalizeEvent({
+    source: 'chateauLaSarraz',
+    title,
+    startDate,
+    endDate,
+    locationName,
+    locationText: [locationName, city].filter(Boolean).join(', '),
+    city,
+    url,
+    description,
+    ageText,
+    priceText,
+    tags,
+    officialSources: [url].filter(Boolean),
+    sourceProvenance: 'Château de La Sarraz — agenda propre (WordPress / The Events Calendar, WP REST /wp-json/tribe/events/v1)',
+    evidence: clean([
+      title,
+      startDate && `début ${startDate}`,
+      endDate && `fin ${endDate}`,
+      city && `lieu ${locationName} (${city})`,
+      catText && `catégories ${catText}`,
+      priceText && `prix ${priceText}`,
+      description
+    ].filter(Boolean).join(' | '))
+  });
+}
+
+async function scrapeChateauLaSarraz() {
+  const today = isoDateZurich(new Date().toISOString().slice(0, 10)) || new Date().toISOString().slice(0, 10);
+  const startDate = today.slice(0, 10);
+  const events = [];
+  try {
+    let url = `${SOURCES.chateauLaSarraz.apiUrl}?per_page=50&start_date=${startDate}`;
+    for (let page = 0; page < 6 && url; page++) {
+      const payload = await fetchEmoiJson(url, 30000);
+      const list = Array.isArray(payload && payload.events) ? payload.events : [];
+      for (const raw of list) {
+        if (!raw || !raw.title) continue;
+        const ev = parseLaSarrazEvent(raw, { baseUrl: SOURCES.chateauLaSarraz.baseUrl });
+        if (ev && ev.startDate) events.push(ev);
+      }
+      url = payload && payload.next_rest_url ? payload.next_rest_url : null;
+    }
+  } catch (e) {
+    return [{ source: 'chateauLaSarraz', title: 'Château de La Sarraz agenda', url: SOURCES.chateauLaSarraz.url, error: e.message }];
+  }
+  return uniqBy(events, e => e.url || e.id);
+}
+
 // --- FribourgRégion / Terroir Fribourg — Broye & Lac de Morat (WP REST) -------
 // fribourg.ch (ex fribourgregion.ch) exposes an `event` post type on its public
 // WP REST API. The canton-wide list is 845 events, so we scope by the `region`
@@ -5255,7 +5390,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -5992,6 +6127,47 @@ async function runFixtureTests() {
   assert.strictEqual(estimateDistanceKm(sunsetJazzEvent), 22, 'Sunset Jazz Estavayer-le-Lac should resolve to 22 km from Yverdon');
   const sunsetJazzMatinee = sunsetJazzEventFromDay(sunsetJazzDays[1]);
   assert.strictEqual(sunsetJazzMatinee.startDate, '2026-07-12T10:30:00+02:00', 'Sunset Jazz Sunday matinée keeps its morning start time');
+
+  // Château de La Sarraz — The Events Calendar (Tribe) REST JSON events.
+  const laSarrazTimed = parseLaSarrazEvent({
+    all_day: false,
+    title: 'SCHUMANNIADE AU CH&#194;TEAU &#8211; 16 Ao&#251;t',
+    start_date: '2026-08-16 17:00:00',
+    start_date_details: { year: '2026', month: '08', day: '16', hour: '17', minutes: '00', seconds: '00' },
+    end_date_details: { year: '2026', month: '08', day: '16', hour: '22', minutes: '00', seconds: '00' },
+    url: 'https://chateau-lasarraz.ch/event/schumanniade-au-chateau-16-aout/',
+    venue: { venue: 'Château de La Sarraz', city: 'La Sarraz' },
+    cost: 'CHF30',
+    cost_details: { currency_symbol: 'CHF', currency_code: 'CHF', values: ['30'] },
+    categories: [{ name: 'Concert' }],
+    description: '<div class="tribe-events-content"><p>Concert au château.</p></div>'
+  });
+  assert.strictEqual(laSarrazTimed.source, 'chateauLaSarraz');
+  assert.strictEqual(laSarrazTimed.title, 'SCHUMANNIADE AU CHÂTEAU – 16 Août', 'La Sarraz title should be HTML-entity decoded');
+  assert.strictEqual(laSarrazTimed.startDate, '2026-08-16T17:00:00+02:00', 'La Sarraz timed event should apply the DST-aware start time');
+  assert.strictEqual(laSarrazTimed.endDate, null, 'La Sarraz single-day timed event keeps no end date');
+  assert.strictEqual(laSarrazTimed.city, 'La Sarraz');
+  assert.strictEqual(laSarrazTimed.priceText, 'CHF 30', 'La Sarraz price should come from cost_details');
+  assert.strictEqual(estimateDistanceKm(laSarrazTimed), 15, 'La Sarraz should resolve to 15 km from Yverdon');
+  // All-day multi-day salon: Tribe stores the end just past midnight of the day
+  // after the last real day → the parser must roll it back one day (4 au 6 sept).
+  const laSarrazAllDay = parseLaSarrazEvent({
+    all_day: true,
+    title: '2&#232;me Salon du terroir &#8211; 4 au 6 septembre',
+    start_date: '2026-09-04 02:00:00',
+    start_date_details: { year: '2026', month: '09', day: '04', hour: '02', minutes: '00', seconds: '00' },
+    end_date_details: { year: '2026', month: '09', day: '07', hour: '01', minutes: '59', seconds: '59' },
+    url: 'https://chateau-lasarraz.ch/event/2eme-salon-du-terroir/',
+    venue: { venue: 'Château de La Sarraz', city: 'La Sarraz' },
+    cost: '',
+    cost_details: { values: [] },
+    categories: [{ name: 'Balthazar Festival' }],
+    description: '<p>Salon du terroir au château.</p>'
+  });
+  assert.strictEqual(laSarrazAllDay.startDate, '2026-09-04', 'La Sarraz all-day event keeps a date-level start');
+  assert.strictEqual(laSarrazAllDay.endDate, '2026-09-06', 'La Sarraz all-day multi-day end should roll back to the last real day');
+  assert.strictEqual(laSarrazAllDay.priceText, '', 'La Sarraz salon with no cost_details keeps price empty');
+
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -6168,4 +6344,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz };
