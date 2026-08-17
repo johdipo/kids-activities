@@ -23,6 +23,8 @@ const LOCATION_KM_FROM_YVERDON = {
   orbe: 12,
   vallorbe: 23,
   champvent: 8,
+  chavornay: 13,
+  'essert-pittet': 15,
   'la sarraz': 15,
   'sainte-croix': 23,
   'cheseaux-noreaz': 5,
@@ -327,6 +329,26 @@ const SOURCES = {
     url: 'https://www.murten-morat.ch/anlaesseaktuelles',
     baseUrl: 'https://www.murten-morat.ch',
     kind: 'iweb-communal-morat-lakeside-agenda'
+  },
+  chavornay: {
+    // Commune de Chavornay (Nord vaudois, ~13 km d'Yverdon, sur la plaine de l'Orbe
+    // entre Orbe et Yverdon) : agenda communal officiel des manifestations. Commune
+    // encore non couverte (distincte de `orbe`/`grandson`/`champvent`), avec un vrai
+    // volet famille/jeunesse/village — programme d'activités été EJED (enfance
+    // jeunesse), café contact & créatif, marché villageois, fêtes et manifestations
+    // locales — bon fit famille / village / terroir (signal de goût Johan). Même CMS
+    // I-Web que `murtenMorat`/`sainteCroix`/`vallorbe` : la page `/anlaesseaktuelles`
+    // expose la charge utile JSON `#anlassList[data-entities]` (id, name+lien, ort,
+    // lokalitaet, datumVon/datumBis en epoch ms, organisator). Chaque événement utilise
+    // sa page de détail `/anlaesseaktuelles/<id>` (le lien brut `/_rte/anlass/<id>`
+    // redirige 301 vers cette forme canonique) comme URL stable et est enrichi
+    // (description, prix « entrée libre »/CHF, horaire éventuel depuis le corps FR).
+    // Distinct de `j3l` (agenda touristique régional) : ce sont les manifestations
+    // communales (dont civiques) portées par la Commune ; le dédup URL/reco en aval
+    // absorbe d'éventuels recoupements avec la couche tourisme.
+    url: 'https://www.chavornay.ch/anlaesseaktuelles',
+    baseUrl: 'https://www.chavornay.ch',
+    kind: 'iweb-communal-nord-vaudois-agenda'
   },
   laSauge: {
     // Centre-Nature BirdLife de La Sauge (La Sauge 1588 Cudrefin, VD), sur la rive
@@ -3874,6 +3896,134 @@ async function scrapeMurtenMorat() {
   return uniqBy(events.filter(e => e.title && e.startDate), e => recommendationKey(e));
 }
 
+// --- Chavornay — agenda communal (I-Web, Nord vaudois) -----------------------
+// The raw listing link is `/_rte/anlass/<id>`, which 301-redirects to the
+// canonical `/anlaesseaktuelles/<id>` detail page; we store the canonical form
+// directly so the stable URL matches what a visitor lands on.
+function chavornayEventUrl(id) {
+  return id ? canonicalUrl(`/anlaesseaktuelles/${id}`, SOURCES.chavornay.baseUrl) : '';
+}
+
+// Conservative French start-time extraction from a detail body. Civic items
+// (votations/élections) carry polling-office opening hours that are NOT event
+// times, so the caller guards those out by title; here we only accept a time
+// introduced by a real event cue ("dès", "à", "départ", "ouverture", "portes",
+// "rendez-vous") to avoid grabbing incidental hours.
+function parseChavornayDetailTime(text) {
+  const m = clean(text).match(/(?:d[èe]s|\bà\b|d[ée]part\s*:?|ouverture\s*:?|portes\s*:?|rendez-?vous\s*:?)\s*(\d{1,2})\s*h\s*(\d{2})?/i);
+  if (!m) return '';
+  const hour = Number(m[1]);
+  if (hour > 23) return '';
+  return `${String(hour).padStart(2, '0')}:${m[2] || '00'}`;
+}
+
+function extractChavornayListings(html) {
+  const $ = cheerio.load(html);
+  const attr = $('#anlassList').attr('data-entities');
+  if (!attr) return [];
+  let payload;
+  try { payload = JSON.parse(attr); } catch { return []; }
+  return (payload.data || []).map(row => {
+    const name$ = cheerio.load(row.name || '');
+    const title = clean(name$.text() || row.name);
+    const link = name$('a').attr('href');
+    const id = row.id || (link && (link.match(/anlass\/(\d+)/) || [])[1]) || '';
+    const ort = clean(cheerio.load(row.ort || '').text() || row.ort || 'Chavornay').split('\n')[0] || 'Chavornay';
+    const venue = clean(cheerio.load(row.lokalitaet || '').text() || row.lokalitaet || '').split('\n')[0];
+    const organisatorText = clean(cheerio.load(row.organisator || '').text() || row.organisator || '');
+    const organizer = /^https?:\/\//i.test(organisatorText) ? '' : organisatorText;
+    const organizerUrl = /^https?:\/\//i.test(organisatorText) ? organisatorText : ((row.organisator || '').match(/https?:\/\/[^"'\s<]+/) || [''])[0];
+    const startDate = iwebTimestampToZurichIso(row.datumVon || row['datumVon-sort']);
+    const endDate = iwebTimestampToZurichIso(row.datumBis || row['datumBis-sort']);
+    return {
+      id,
+      title,
+      url: chavornayEventUrl(id) || canonicalUrl(link, SOURCES.chavornay.url),
+      startDate: startDate ? startDate.slice(0, 10) : null,
+      endDate: endDate && endDate.slice(0, 10) !== (startDate || '').slice(0, 10) ? endDate.slice(0, 10) : null,
+      locationText: clean([venue, ort].filter(Boolean).join(', ')) || ort,
+      city: ort,
+      organizer,
+      organizerUrl
+    };
+  }).filter(x => x.id && x.title && x.startDate);
+}
+
+function parseChavornayDetail(html, fallback = {}) {
+  const $ = cheerio.load(html);
+  $('script, style, nav, header, footer').remove();
+  let mainText = clean($('main').first().text()) || clean($('body').text());
+  // Drop the I-Web breadcrumb prefix and the "modify this listing" boilerplate tail.
+  const cut = mainText.search(/Objets associés|Si vous souhaitez modifier|Partager\b/i);
+  if (cut > 0) mainText = clean(mainText.slice(0, cut));
+  const isCivic = /votation|élection|election|scrutin/i.test(fallback.title || '');
+  const startTime = (!isCivic && !fallback.endDate) ? parseChavornayDetailTime(mainText) : '';
+  const startDate = startTime ? isoDateZurich(fallback.startDate, startTime) : fallback.startDate;
+  const freeMatch = mainText.match(/entr[ée]e?\s+libre|entr[ée]e?\s+gratuite|gratuit(?:e|es)?\b|prix\s+libre/i);
+  const priceMatch = mainText.match(/CHF\s?\d+[.\-]?\d*|\d+[.\-]\s?(?:CHF|Fr\.?)\b/i);
+  const price = freeMatch ? freeMatch[0] : (priceMatch ? priceMatch[0] : '');
+  // Description: strip the leading title + venue/address/date fragment, keep the body.
+  let description = mainText;
+  if (fallback.title) { const i = description.indexOf(fallback.title); if (i >= 0) description = description.slice(i + fallback.title.length); }
+  description = clean(description
+    .replace(/\b\d{1,2}\s*[a-zàâäéèêëîïôöûü]+\.?\s*\d{4}(?:\s*-\s*\d{1,2}\s*[a-zàâäéèêëîïôöûü]+\.?\s*\d{4})?/i, ' ')
+    .replace(/^\s*(?:\d{4}\s+)?[A-Za-zÀ-ÿ'’\- ]{0,60}?(?:Contact\b)/i, m => m.length > 120 ? '' : ' ')
+  ).slice(0, 700) || fallback.organizer || fallback.title;
+  const familyHay = `${fallback.title} ${description} ${fallback.organizer}`;
+  const ageText = /famil|enfant|jeunesse|ejed|caf[ée]\s+contact|cr[ée]atif|march[ée]|f[êe]te|atelier|conte|spectacle|jeux|ludoth[èe]que|brocante|cirque|tout\s+public|d[èe]s\s+\d/i.test(familyHay)
+    ? 'famille / tout public possible' : '';
+  const officialSources = [fallback.organizerUrl, fallback.url].filter(Boolean);
+  const evidence = clean([fallback.title, startDate, fallback.endDate, fallback.locationText, fallback.organizer, price, description].filter(Boolean).join(' | ')).slice(0, 1200);
+  return normalizeEvent({
+    source: 'chavornay',
+    title: fallback.title,
+    startDate,
+    endDate: fallback.endDate && fallback.endDate !== fallback.startDate ? fallback.endDate : null,
+    locationName: (fallback.locationText || 'Chavornay').split(',')[0],
+    locationText: fallback.locationText || 'Chavornay',
+    city: fallback.city || 'Chavornay',
+    url: fallback.url,
+    description,
+    priceText: price,
+    ageText,
+    tags: inferTags(`${familyHay} Chavornay Nord vaudois village famille`),
+    sourceProvenance: `Commune de Chavornay — agenda des manifestations: ${fallback.url}`,
+    officialSources,
+    evidence
+  });
+}
+
+async function scrapeChavornay() {
+  let html;
+  try {
+    html = await fetchHtml(SOURCES.chavornay.url, 30000);
+  } catch (e) {
+    return [{ source: 'chavornay', title: 'Chavornay agenda', url: SOURCES.chavornay.url, error: e.message }];
+  }
+  const listings = extractChavornayListings(html);
+  const today = new Date().toISOString().slice(0, 10);
+  const events = [];
+  for (const item of listings) {
+    // Skip clearly past events before spending a detail fetch.
+    if (((item.endDate || item.startDate) || '').slice(0, 10) < today) continue;
+    try {
+      const detailHtml = await fetchHtml(item.url, 20000);
+      events.push(parseChavornayDetail(detailHtml, item));
+    } catch (e) {
+      events.push(normalizeEvent({
+        source: 'chavornay', title: item.title, startDate: item.startDate, endDate: item.endDate,
+        locationName: (item.locationText || 'Chavornay').split(',')[0], locationText: item.locationText, city: item.city,
+        url: item.url, description: item.organizer || item.title,
+        tags: inferTags(`${item.title} ${item.organizer} Chavornay Nord vaudois village`),
+        sourceProvenance: `Commune de Chavornay — agenda des manifestations: ${item.url}`,
+        officialSources: [item.organizerUrl, item.url].filter(Boolean),
+        evidence: clean([item.title, item.startDate, item.endDate, item.locationText, item.organizer].filter(Boolean).join(' | '))
+      }));
+    }
+  }
+  return uniqBy(events.filter(e => e.title && e.startDate), e => recommendationKey(e));
+}
+
 // --- Centre-Nature BirdLife de La Sauge (Cudrefin, Grande Cariçaie) -----------
 // Drupal page; Node fetch works, but use a curl-backed fetch for the same
 // reliability the other communal/CMS sources rely on.
@@ -5390,7 +5540,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -5676,6 +5826,31 @@ async function runFixtureTests() {
   assert.strictEqual(murtenEvent.city, 'Murten');
   assert(murtenEvent.priceText.match(/frei/i), 'Murten fixture should capture free-entry evidence');
   assert(murtenEvent.officialSources.some(u => /_rte\/anlass\/5464640/.test(u)), 'Murten should keep the official detail URL');
+  // --- Chavornay (agenda communal I-Web, Nord vaudois) ----------------------
+  const chavornayEntities = JSON.stringify({ data: [
+    { id: '7478179', name: '<a href="/_rte/anlass/7478179">Programme activités été 2026 EJED</a>', ort: 'Chavornay', lokalitaet: '', datumVon: '1782856800000', datumBis: '1787522400000', organisator: 'EJED' },
+    { id: '7575190', name: '<a href="/_rte/anlass/7575190">Course annuelle pour les retraités 2026</a>', ort: 'Essert-Pittet', lokalitaet: 'Salle Essert-Pittet', datumVon: '1788472800000', datumBis: '1788472800000', organisator: 'Commune' },
+    { id: '7577533', name: '<a href="/_rte/anlass/7577533">Votation fédérale et cantonale</a>', ort: 'Chavornay', lokalitaet: 'Bureau de vote', datumVon: '1790460000000', datumBis: '1790460000000', organisator: 'Commune' }
+  ] }).replace(/"/g, '&quot;');
+  const chavornayRows = extractChavornayListings(`<table id="anlassList" data-entities="${chavornayEntities}"></table>`);
+  assert.strictEqual(chavornayRows.length, 3, 'Chavornay should parse all anlassList rows');
+  assert.strictEqual(chavornayRows[0].title, 'Programme activités été 2026 EJED');
+  assert(chavornayRows[0].endDate && chavornayRows[0].endDate !== chavornayRows[0].startDate, 'Chavornay multi-day range should keep the end date');
+  assert(chavornayRows[0].url.endsWith('/anlaesseaktuelles/7478179'), 'Chavornay should use the canonical detail URL, not /_rte');
+  assert.strictEqual(chavornayRows[1].city, 'Essert-Pittet', 'Chavornay should read the per-event ort as city');
+  assert.strictEqual(chavornayRows[1].endDate, null, 'Chavornay single-day event should collapse end date to null');
+  // Detail time extractor: a cued event time is captured, incidental hours ignored.
+  assert.strictEqual(parseChavornayDetailTime('Le marché ouvre dès 9h00 sur la Grand-Rue'), '09:00', 'Chavornay should read a cued start time');
+  assert.strictEqual(parseChavornayDetailTime('Le bureau est ouvert de 10 h 00 le dimanche'), '', 'Chavornay should not treat "de 10 h" as an event start time');
+  const chavornayCivic = parseChavornayDetail('<main>Accueil Actualités Événements Votation fédérale et cantonale Chavornay 1 mars 2026 Contact Commune Il est ouvert de 10 h 00 à 11 h 00 le dimanche. Objets associés Documents</main>', chavornayRows[2]);
+  assert.strictEqual(chavornayCivic.source, 'chavornay');
+  assert.strictEqual(chavornayCivic.startDate, chavornayRows[2].startDate, 'Chavornay civic event keeps a date-level start (polling hours are not an event time)');
+  assert.strictEqual(chavornayCivic.city, 'Chavornay');
+  assert.strictEqual(estimateDistanceKm(chavornayCivic), 13, 'Chavornay should resolve to 13 km from Yverdon');
+  const chavornayFete = parseChavornayDetail('<main>Accueil Événements Fête au village Chavornay 12 sept. 2026 Contact Commune La fête démarre dès 17h30 avec animations pour les enfants et les familles. Entrée libre. Objets associés</main>', { id: '999', title: 'Fête au village', url: 'https://www.chavornay.ch/anlaesseaktuelles/999', startDate: '2026-09-12', endDate: null, locationText: 'Chavornay', city: 'Chavornay', organizer: 'Commune' });
+  assert.strictEqual(chavornayFete.startDate, '2026-09-12T17:30:00+02:00', 'Chavornay single-day fête should apply the cued DST-aware start time');
+  assert(/libre/i.test(chavornayFete.priceText), 'Chavornay should capture free-entry evidence');
+  assert(chavornayFete.ageText, 'Chavornay family-flavoured event should carry an age/public hint');
   // --- La Sauge (Centre-Nature BirdLife, Cudrefin) --------------------------
   assert.deepStrictEqual(
     (({ startDay, startMonth, endDay, endMonth, startTime, endTime }) => ({ startDay, startMonth, endDay, endMonth, startTime, endTime }))(parseLaSaugeDateLine('Samedi 4 juillet, 13h – 15h')),
@@ -6344,4 +6519,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz };
