@@ -3089,13 +3089,79 @@ function practicalCaveat(caveats = []) {
   if (!caveats.length) return 'détails pratiques à vérifier';
   return caveats.slice(0, 2).join(' ; ');
 }
-function shortlistedRecommendations(scored) {
+// --- Digest selection (TASK-230) ---------------------------------------------
+// The window filter (dateFit) lets a permanent exhibit through *every* weekend
+// because it started months ago and ends far in the future. Those evergreen
+// exhibits also score near the top (childCentric + nature tags + free + close),
+// so a naive `slice(0, 5)` served the same 3 Champ-Pittet + 2 Grandson entries
+// week after week and crowded out the dated one-off gems (ateliers, fêtes) that
+// actually happen *on* the target weekend. The selection below fixes that with:
+//  - an explicit deterministic sort (recommandé first, then score desc, stable),
+//  - a per-source cap so one venue can't monopolise the shortlist,
+//  - an evergreen-vs-dated distinction that caps permanent exhibits so dated
+//    events surface, while keeping the best evergreen ones eligible.
+const SHORTLIST_SIZE = 5;
+const SHORTLIST_MAX_EVERGREEN = 1;   // at most this many permanent exhibits in the top-N
+const EVERGREEN_MIN_SPAN_DAYS = 8;   // spans more than a week → treated as ongoing/permanent
+
+// An event is "evergreen" (permanent/ongoing exhibit) when it started before the
+// target window, still runs past it, and spans more than a week — i.e. it passes
+// the date filter mechanically every weekend rather than being a dated one-off.
+function isEvergreenEvent(e, window) {
+  if (!window || !e || !e.startDate) return false;
+  const start = e.startDate.slice(0, 10);
+  const end = (e.endDate || e.startDate).slice(0, 10);
+  const startsBeforeWindow = start < window.start;
+  const runsPastWindow = end >= window.endExclusive;
+  const spanDays = (Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000;
+  return startsBeforeWindow && runsPastWindow && spanDays >= EVERGREEN_MIN_SPAN_DAYS;
+}
+
+function shortlistedRecommendations(scored, window) {
   const candidates = scored.filter(x => x.score.total >= 60);
-  return candidates.filter(x => x.score.label === 'recommandé').concat(candidates.filter(x => x.score.label !== 'recommandé')).slice(0, 5);
+  // Deterministic order: recommandé label first, then score desc, then a stable
+  // tiebreak on source + event id so the same pool always yields the same list.
+  const ordered = candidates.slice().sort((a, b) => {
+    const la = a.score.label === 'recommandé' ? 0 : 1;
+    const lb = b.score.label === 'recommandé' ? 0 : 1;
+    if (la !== lb) return la - lb;
+    if (b.score.total !== a.score.total) return b.score.total - a.score.total;
+    const sa = a.event.source || '', sb = b.event.source || '';
+    if (sa !== sb) return sa < sb ? -1 : 1;
+    const ia = a.event.id || '', ib = b.event.id || '';
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
+  });
+
+  const picked = [];
+  const sourceCount = new Map();
+  let evergreenCount = 0;
+  // Escalating passes: enforce diversity (1/source) and the evergreen cap first;
+  // only relax them if the pool is too thin to fill the shortlist otherwise, so
+  // we never return fewer entries than the old slice() when candidates exist.
+  const passes = [
+    { perSourceCap: 1, capEvergreen: true },
+    { perSourceCap: 2, capEvergreen: true },
+    { perSourceCap: Infinity, capEvergreen: false }
+  ];
+  for (const { perSourceCap, capEvergreen } of passes) {
+    for (const c of ordered) {
+      if (picked.length >= SHORTLIST_SIZE) break;
+      if (picked.includes(c)) continue;
+      const src = c.event.source || 'unknown';
+      if ((sourceCount.get(src) || 0) >= perSourceCap) continue;
+      const evergreen = isEvergreenEvent(c.event, window);
+      if (evergreen && capEvergreen && evergreenCount >= SHORTLIST_MAX_EVERGREEN) continue;
+      picked.push(c);
+      sourceCount.set(src, (sourceCount.get(src) || 0) + 1);
+      if (evergreen) evergreenCount++;
+    }
+    if (picked.length >= SHORTLIST_SIZE) break;
+  }
+  return picked.slice(0, SHORTLIST_SIZE);
 }
 
 function telegramSummary(scored, window) {
-  const top = shortlistedRecommendations(scored);
+  const top = shortlistedRecommendations(scored, window);
   if (!top.length) return `Idées famille pour ce week-end — ${frWindow(window)}\n\nAucune recommandation fiable: les sources ont été collectées, mais rien ne passe les filtres date/lieu/qualité.`;
   const lines = [
     `BROUILLON NON VALIDÉ — reviews dédiées par événement requises avant envoi`,
@@ -3113,7 +3179,7 @@ function telegramSummary(scored, window) {
 }
 
 function eventReviewQueue(scored, window) {
-  const top = shortlistedRecommendations(scored);
+  const top = shortlistedRecommendations(scored, window);
   return {
     status: top.length ? 'reviews_required_before_send' : 'no_recommendations',
     instruction: 'Open one isolated subagent/session per shortlisted event. Each must open/read the canonical event page, verify practical facts, challenge ranking, and write event-reviews/<event-id>.md before any final Telegram summary is sent.',
@@ -6447,6 +6513,63 @@ async function runFixtureTests() {
     assert(!scoredFail[0].enriched, 'failed candidate should not be marked enriched');
     console.log(`[TEST] two-stage scoring: poor ${stage1Poor} -> ${poorItem.score.total} (enriched), dull never fetched, fetch-failure falls back cleanly`);
   }
+
+  // --- Digest selection tests (TASK-230) ------------------------------------
+  // Reproduces the reported bug: high-scoring permanent Champ-Pittet / Grandson
+  // exhibits (in-window every weekend) used to take all 5 slices and evict the
+  // dated one-off gems. Asserts diversity-by-source, the evergreen cap, and a
+  // deterministic score-desc order.
+  {
+    const win = { start: '2026-08-22', endExclusive: '2026-08-24' };
+    const evergreen = (source, id, total) => ({
+      event: { source, id, title: id, url: `https://x.invalid/${id}`, startDate: '2026-03-28', endDate: '2026-12-31' },
+      score: { total, label: 'recommandé', reasons: [], caveats: [] }
+    });
+    const dated = (source, id, total) => ({
+      event: { source, id, title: id, url: `https://x.invalid/${id}`, startDate: '2026-08-23', endDate: null },
+      score: { total, label: 'recommandé', reasons: [], caveats: [] }
+    });
+
+    // evergreen-vs-dated helper
+    assert(isEvergreenEvent(evergreen('champPittet', 'cp', 96).event, win), 'permanent exhibit (long span, starts before, runs past) is evergreen');
+    assert(!isEvergreenEvent(dated('grandsonChateau', 'gc', 94).event, win), 'dated one-off on the target weekend is not evergreen');
+    assert(!isEvergreenEvent({ source: 's', startDate: '2026-08-23', endDate: '2026-08-25' }, win), 'a 2-day weekend event is not evergreen even if it spills one day past');
+
+    const pool = [
+      evergreen('champPittet', 'cp-abeilles', 96),
+      evergreen('champPittet', 'cp-sentier', 95),
+      evergreen('champPittet', 'cp-quivitla', 94),
+      evergreen('grandson', 'gr-expo1', 93),
+      evergreen('grandson', 'gr-expo2', 92),
+      dated('grandsonChateau', 'gc-armoirie', 94),
+      dated('echallensTourisme', 'et-mondes', 92),
+      dated('fribourgTerroir', 'ft-prehistoire', 90),
+      dated('avenches', 'av-aventicum', 88)
+    ];
+    // Shuffle to prove the selection sorts deterministically regardless of input order.
+    const shuffled = [pool[5], pool[0], pool[8], pool[3], pool[6], pool[1], pool[7], pool[4], pool[2]];
+    const top = shortlistedRecommendations(shuffled, win);
+
+    assert.strictEqual(top.length, 5, `shortlist should fill to 5, got ${top.length}`);
+    const sources = top.map(t => t.event.source);
+    assert.strictEqual(new Set(sources).size, 5, `each shortlist entry should come from a distinct source, got ${sources.join(', ')}`);
+    const evergreenPicked = top.filter(t => isEvergreenEvent(t.event, win)).length;
+    assert(evergreenPicked <= SHORTLIST_MAX_EVERGREEN, `at most ${SHORTLIST_MAX_EVERGREEN} evergreen entry expected, got ${evergreenPicked}`);
+    for (const gem of ['gc-armoirie', 'et-mondes', 'ft-prehistoire']) {
+      assert(top.some(t => t.event.id === gem), `dated gem ${gem} should surface in the shortlist`);
+    }
+    const cpCount = sources.filter(s => s === 'champPittet').length;
+    assert(cpCount <= 1, `Champ-Pittet must not monopolise the shortlist, got ${cpCount} entries`);
+    // Determinism: same pool → identical ids in identical order.
+    const again = shortlistedRecommendations(pool, win).map(t => t.event.id);
+    assert.deepStrictEqual(top.map(t => t.event.id), again, 'selection must be deterministic across input orderings');
+
+    // Thin pool: only same-source evergreen exhibits still return all of them
+    // (escalation) rather than dropping below the old slice() count.
+    const thin = [evergreen('champPittet', 'a', 96), evergreen('champPittet', 'b', 95), evergreen('champPittet', 'c', 94)];
+    assert.strictEqual(shortlistedRecommendations(thin, win).length, 3, 'thin same-source pool should still fill from what exists');
+    console.log(`[TEST] digest selection (TASK-230): 5 distinct sources, ${evergreenPicked} evergreen, dated gems surfaced, deterministic`);
+  }
   console.log(`[TEST] fixture/date/source-probe tests passed (${fixtures.length} fixtures)`);
 }
 
@@ -6519,4 +6642,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz };
