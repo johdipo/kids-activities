@@ -24,6 +24,7 @@ const LOCATION_KM_FROM_YVERDON = {
   vallorbe: 23,
   champvent: 8,
   chavornay: 13,
+  pomy: 4,
   'essert-pittet': 15,
   'la sarraz': 15,
   'sainte-croix': 23,
@@ -576,6 +577,25 @@ const SOURCES = {
     apiUrl: 'https://chateau-lasarraz.ch/wp-json/tribe/events/v1/events',
     baseUrl: 'https://chateau-lasarraz.ch',
     kind: 'wordpress-the-events-calendar-rest-chateau-lasarraz'
+  },
+  pomy: {
+    // Commune de Pomy (village du Nord vaudois, ~4 km d'Yverdon, sur le coteau
+    // au sud-est de la ville) : agenda communal des manifestations publiques —
+    // fête de la pomme de la Fanfare, marché de Noël, repas intergénérationnel,
+    // week-end du Jeûne de la Jeunesse, soirées de gym, + votations/élections.
+    // Bon fit village / famille / terroir (signal de goût Johan), commune encore
+    // NON couverte (distincte de chavornay/champvent/grandson/orbe). Plateforme :
+    // WordPress + « The Events Calendar » (Tribe) qui expose l'API REST publique
+    // /wp-json/tribe/events/v1/events (même pattern que chateauLaSarraz). Le
+    // calendrier brut est saturé de réservations de salles et d'entraînements de
+    // clubs (salle-polyvalente, réservations-poméranne, salle-du-levant), donc on
+    // scope STRICTEMENT à la catégorie « autres-evenements » = vraies
+    // manifestations publiques du village.
+    url: 'https://pomy.ch/evenements/',
+    apiUrl: 'https://pomy.ch/wp-json/tribe/events/v1/events',
+    baseUrl: 'https://pomy.ch',
+    category: 'autres-evenements',
+    kind: 'wordpress-the-events-calendar-rest-pomy'
   },
   manualJohan: {
     url: 'manual://johan/kids-activities',
@@ -3458,6 +3478,103 @@ async function scrapeChateauLaSarraz() {
   return uniqBy(events, e => e.url || e.id);
 }
 
+// --- Commune de Pomy — agenda communal (WordPress / The Events Calendar REST) --
+// Même plateforme Tribe que chateauLaSarraz : on réutilise les helpers génériques
+// laSarrazDayFromDetails / laSarrazPrice. Le calendrier brut mélange réservations
+// de salles + entraînements de clubs (salle-polyvalente, réservations-poméranne,
+// salle-du-levant, ~1300 occurrences) : on scope à la catégorie publique
+// « autres-evenements » côté API (categories=<slug>) pour ne garder que les vraies
+// manifestations du village. La plupart sont all-day (fêtes, marchés, votations).
+function parsePomyEvent(raw, opts = {}) {
+  const base = opts.baseUrl || SOURCES.pomy.baseUrl;
+  const allDay = raw.all_day === true || raw.all_day === '1' || raw.all_day === 'yes';
+  const startDay = laSarrazDayFromDetails(raw.start_date_details);
+  if (!startDay) return null;
+  let endDay = laSarrazDayFromDetails(raw.end_date_details);
+  // Tribe borne les all-day à 23:59:59 du même jour (ou juste après minuit du
+  // lendemain pour certains) : replier une fin < 3h sur le jour précédent.
+  if (allDay && endDay && raw.end_date_details && Number(raw.end_date_details.hour) < 3) {
+    const dt = new Date(`${endDay}T12:00:00Z`);
+    dt.setUTCDate(dt.getUTCDate() - 1);
+    endDay = dt.toISOString().slice(0, 10);
+  }
+  let startDate;
+  let endDate = null;
+  if (allDay) {
+    startDate = startDay;
+    endDate = endDay && endDay !== startDay ? endDay : null;
+  } else {
+    const sd = raw.start_date_details || {};
+    startDate = isoDateZurich(startDay, `${sd.hour || ''}:${sd.minutes || '00'}`);
+    endDate = endDay && endDay !== startDay ? endDay : null;
+  }
+  const title = decodeHtmlEntities(raw.title || '');
+  const venue = raw.venue && typeof raw.venue === 'object' && !Array.isArray(raw.venue) ? raw.venue : {};
+  const locationName = clean(venue.venue || '') || 'Pomy';
+  const city = clean(venue.city || '') || 'Pomy';
+  const categories = (raw.categories || []).map(c => clean(c && c.name)).filter(Boolean);
+  const tagLabels = (raw.tags || []).map(t => clean(t && t.name)).filter(Boolean);
+  const catText = [...new Set([...categories, ...tagLabels])].join(', ');
+  const description = decodeHtmlEntities(raw.description || raw.excerpt || '');
+  const url = canonicalUrl(raw.url || raw.rest_url || '', base);
+  const hay = `${title} ${description} ${catText}`;
+  const ageText = /famille|enfants?|jeune public|tout public|intergén|d[èe]s \d/i.test(hay)
+    ? 'famille / tout public mentionné'
+    : '';
+  let priceText = laSarrazPrice(raw);
+  if (!priceText && /gratuit|entr[ée]e libre|chapeau|prix libre/i.test(hay)) {
+    priceText = 'Gratuit / prix libre (à confirmer)';
+  }
+  const tags = inferTags(hay);
+  return normalizeEvent({
+    source: 'pomy',
+    title,
+    startDate,
+    endDate,
+    locationName,
+    locationText: [locationName, city].filter(Boolean).join(', '),
+    city,
+    url,
+    description,
+    ageText,
+    priceText,
+    tags,
+    officialSources: [url].filter(Boolean),
+    sourceProvenance: 'Commune de Pomy — agenda communal (WordPress / The Events Calendar, WP REST /wp-json/tribe/events/v1, catégorie « autres-evenements »)',
+    evidence: clean([
+      title,
+      startDate && `début ${startDate}`,
+      endDate && `fin ${endDate}`,
+      city && `lieu ${locationName} (${city})`,
+      catText && `catégories ${catText}`,
+      priceText && `prix ${priceText}`,
+      description
+    ].filter(Boolean).join(' | '))
+  });
+}
+
+async function scrapePomy() {
+  const today = isoDateZurich(new Date().toISOString().slice(0, 10)) || new Date().toISOString().slice(0, 10);
+  const startDate = today.slice(0, 10);
+  const events = [];
+  try {
+    let url = `${SOURCES.pomy.apiUrl}?per_page=50&start_date=${startDate}&categories=${encodeURIComponent(SOURCES.pomy.category)}`;
+    for (let page = 0; page < 6 && url; page++) {
+      const payload = await fetchEmoiJson(url, 30000);
+      const list = Array.isArray(payload && payload.events) ? payload.events : [];
+      for (const raw of list) {
+        if (!raw || !raw.title) continue;
+        const ev = parsePomyEvent(raw, { baseUrl: SOURCES.pomy.baseUrl });
+        if (ev && ev.startDate) events.push(ev);
+      }
+      url = payload && payload.next_rest_url ? payload.next_rest_url : null;
+    }
+  } catch (e) {
+    return [{ source: 'pomy', title: 'Commune de Pomy agenda', url: SOURCES.pomy.url, error: e.message }];
+  }
+  return uniqBy(events, e => e.url || e.id);
+}
+
 // --- FribourgRégion / Terroir Fribourg — Broye & Lac de Morat (WP REST) -------
 // fribourg.ch (ex fribourgregion.ch) exposes an `event` post type on its public
 // WP REST API. The canton-wide list is 845 events, so we scope by the `region`
@@ -5606,7 +5723,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -6409,6 +6526,43 @@ async function runFixtureTests() {
   assert.strictEqual(laSarrazAllDay.endDate, '2026-09-06', 'La Sarraz all-day multi-day end should roll back to the last real day');
   assert.strictEqual(laSarrazAllDay.priceText, '', 'La Sarraz salon with no cost_details keeps price empty');
 
+  // Commune de Pomy — same Tribe REST shape, scoped to « autres-evenements ».
+  // All-day village events bounded at 23:59:59 same day → single-day, no endDate.
+  const pomyAllDay = parsePomyEvent({
+    all_day: true,
+    title: 'Fanfare &#8211; f&#234;te de la pomme',
+    start_date: '2026-10-30 00:00:00',
+    start_date_details: { year: '2026', month: '10', day: '30', hour: '00', minutes: '00', seconds: '00' },
+    end_date_details: { year: '2026', month: '10', day: '30', hour: '23', minutes: '59', seconds: '59' },
+    url: 'https://pomy.ch/event/fanfare-fete-de-la-pomme/',
+    venue: [],
+    cost: '',
+    cost_details: { values: [] },
+    categories: [{ name: 'Autres événements' }],
+    description: ''
+  });
+  assert.strictEqual(pomyAllDay.source, 'pomy');
+  assert.strictEqual(pomyAllDay.title, 'Fanfare – fête de la pomme', 'Pomy title should be HTML-entity decoded');
+  assert.strictEqual(pomyAllDay.startDate, '2026-10-30', 'Pomy all-day event keeps a date-level start');
+  assert.strictEqual(pomyAllDay.endDate, null, 'Pomy same-day all-day event keeps no end date');
+  assert.strictEqual(pomyAllDay.city, 'Pomy', 'Pomy defaults city to Pomy when venue is empty');
+  assert.strictEqual(estimateDistanceKm(pomyAllDay), 4, 'Pomy should resolve to 4 km from Yverdon');
+  assert.strictEqual(pomyAllDay.url, 'https://pomy.ch/event/fanfare-fete-de-la-pomme/', 'Pomy keeps the stable /event/ URL');
+  // Intergenerational meal → family cue picked up from the title.
+  const pomyFamily = parsePomyEvent({
+    all_day: true,
+    title: 'Repas intergénérationnel',
+    start_date: '2026-09-30 00:00:00',
+    start_date_details: { year: '2026', month: '09', day: '30', hour: '00', minutes: '00', seconds: '00' },
+    end_date_details: { year: '2026', month: '09', day: '30', hour: '23', minutes: '59', seconds: '59' },
+    url: 'https://pomy.ch/event/repas-intergenerationnel-2/',
+    venue: [],
+    cost_details: { values: [] },
+    categories: [{ name: 'Autres événements' }],
+    description: ''
+  });
+  assert(/famille|tout public/i.test(pomyFamily.ageText), 'Pomy intergénérationnel should flag a family / tout public cue');
+
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -6642,4 +6796,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy };
