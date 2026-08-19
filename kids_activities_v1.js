@@ -25,6 +25,7 @@ const LOCATION_KM_FROM_YVERDON = {
   champvent: 8,
   chavornay: 13,
   pomy: 4,
+  chamblon: 4,
   'essert-pittet': 15,
   'la sarraz': 15,
   'sainte-croix': 23,
@@ -117,6 +118,16 @@ const LOCATION_KM_FROM_YVERDON = {
   'môtiers': 19,
   boveresse: 21,
   noiraigue: 26,
+  // Val-de-Travers (vallon.info) — villages du fond du vallon non déjà listés.
+  // Distances routières approx. depuis Yverdon (col de la Clusette / tunnel).
+  'val-de-travers': 22,
+  couvet: 22,
+  travers: 24,
+  'les verrieres': 28,
+  'les verrières': 28,
+  'la cote-aux-fees': 30,
+  'la côte-aux-fées': 30,
+  'les bayards': 28,
   fetigny: 27,
   'fétigny': 27,
   bevaix: 30,
@@ -596,6 +607,46 @@ const SOURCES = {
     baseUrl: 'https://pomy.ch',
     category: 'autres-evenements',
     kind: 'wordpress-the-events-calendar-rest-pomy'
+  },
+  chamblon: {
+    // Commune de Chamblon (village du Nord vaudois, ~4 km d'Yverdon, sur la
+    // colline à l'ouest de la ville) : agenda communal des manifestations —
+    // séances du Conseil général, sortie des aînés, fêtes/manifestations du
+    // village. Commune encore NON couverte (distincte de pomy/chavornay/
+    // champvent/grandson/orbe). Plateforme : WordPress + « The Events Calendar »
+    // (Tribe) exposant l'API REST publique /wp-json/tribe/events/v1/events (même
+    // pattern que chateauLaSarraz/pomy). Calendrier léger (pas de saturation de
+    // réservations de salles comme Pomy) et sans taxonomie catégories → on prend
+    // tout l'agenda à venir sans scoping de catégorie. venue est un tableau vide
+    // quand absent → ville par défaut Chamblon.
+    url: 'https://chamblon.ch/events/',
+    apiUrl: 'https://chamblon.ch/wp-json/tribe/events/v1/events',
+    baseUrl: 'https://chamblon.ch',
+    kind: 'wordpress-the-events-calendar-rest-chamblon'
+  },
+  valDeTravers: {
+    // Val-de-Travers — agenda régional « vallon.info » (Neuchâtel, ~19-26 km d'Yverdon
+    // côté Val-de-Travers : Môtiers, Fleurier, Couvet, Travers, Noiraigue, Boveresse,
+    // Buttes…). Pays de l'Absinthe, vallon jurassien : festivals, marchés terroir, fêtes
+    // de village, expos plein-air (Art'Môtiers), nature (Ferme Robert / Creux du Van),
+    // vraie programmation famille (« Boom pour les enfants », Nuit de la Chauve-souris) →
+    // bon fit La Dérivée / plein-air / terroir. DISTINCT de `j3l` (rayon géo-scopé 30 km
+    // autour d'Yverdon qui n'atteint que les villages VdT les plus proches et exclut le
+    // fond du vallon) : vallon.info est l'agenda propre et exhaustif du Val-de-Travers.
+    // Plateforme WordPress + plugin EventON : la page /agenda/ embarque, par événement,
+    // un box `.eventon_list_event` avec `data-time="startUnix-endUnix"` (epoch s, DST-aware
+    // via iwebTimestampToZurichIso) + un schema.org Event (JSON-LD name/description/
+    // startDate/image) + la localisation (`data-location_name`/`data-location_address`
+    // avec NPA+village). L'agenda est saturé de séances de cinéma (Colisée, un seul id
+    // répété) et de matchs de foot de ligue (FC Val-de-Travers) : on écarte le cinéma
+    // (URL/lieu) et on filtre les types via l'API REST publique wp/v2/ajde_events
+    // (event_type 1275=cinéma, 78=sports) pour ne garder que les vraies manifestations
+    // famille/culture/terroir. Fenêtre = mois courant + événements en cours (multi-jours),
+    // rafraîchie à chaque run.
+    url: 'https://vallon.info/agenda/',
+    apiUrl: 'https://vallon.info/wp-json/wp/v2/ajde_events',
+    baseUrl: 'https://vallon.info',
+    kind: 'wordpress-eventon-valdetravers-regional-agenda'
   },
   manualJohan: {
     url: 'manual://johan/kids-activities',
@@ -3575,6 +3626,260 @@ async function scrapePomy() {
   return uniqBy(events, e => e.url || e.id);
 }
 
+// --- Commune de Chamblon — agenda communal (WordPress / The Events Calendar) ---
+// Même plateforme Tribe que chateauLaSarraz / pomy : on réutilise les helpers
+// génériques laSarrazDayFromDetails / laSarrazPrice. À la différence de Pomy, le
+// calendrier de Chamblon est léger (pas de réservations de salles polluantes) et
+// n'expose AUCUNE taxonomie de catégories : on prend donc tout l'agenda à venir
+// sans scoping. venue est un tableau vide `[]` quand absent → ville Chamblon.
+function parseChamblonEvent(raw, opts = {}) {
+  const base = opts.baseUrl || SOURCES.chamblon.baseUrl;
+  const allDay = raw.all_day === true || raw.all_day === '1' || raw.all_day === 'yes';
+  const startDay = laSarrazDayFromDetails(raw.start_date_details);
+  if (!startDay) return null;
+  let endDay = laSarrazDayFromDetails(raw.end_date_details);
+  // Tribe borne les all-day à 23:59:59 du même jour (ou juste après minuit du
+  // lendemain pour certains) : replier une fin < 3h sur le jour précédent.
+  if (allDay && endDay && raw.end_date_details && Number(raw.end_date_details.hour) < 3) {
+    const dt = new Date(`${endDay}T12:00:00Z`);
+    dt.setUTCDate(dt.getUTCDate() - 1);
+    endDay = dt.toISOString().slice(0, 10);
+  }
+  let startDate;
+  let endDate = null;
+  if (allDay) {
+    startDate = startDay;
+    endDate = endDay && endDay !== startDay ? endDay : null;
+  } else {
+    const sd = raw.start_date_details || {};
+    startDate = isoDateZurich(startDay, `${sd.hour || ''}:${sd.minutes || '00'}`);
+    endDate = endDay && endDay !== startDay ? endDay : null;
+  }
+  const title = decodeHtmlEntities(raw.title || '');
+  const venue = raw.venue && typeof raw.venue === 'object' && !Array.isArray(raw.venue) ? raw.venue : {};
+  const locationName = clean(venue.venue || '') || 'Chamblon';
+  const city = clean(venue.city || '') || 'Chamblon';
+  const categories = (raw.categories || []).map(c => clean(c && c.name)).filter(Boolean);
+  const tagLabels = (raw.tags || []).map(t => clean(t && t.name)).filter(Boolean);
+  const catText = [...new Set([...categories, ...tagLabels])].join(', ');
+  const description = decodeHtmlEntities(raw.description || raw.excerpt || '');
+  const url = canonicalUrl(raw.url || raw.rest_url || '', base);
+  const hay = `${title} ${description} ${catText}`;
+  const ageText = /famille|enfants?|jeune public|tout public|intergén|d[èe]s \d/i.test(hay)
+    ? 'famille / tout public mentionné'
+    : '';
+  let priceText = laSarrazPrice(raw);
+  if (!priceText && /gratuit|entr[ée]e libre|chapeau|prix libre/i.test(hay)) {
+    priceText = 'Gratuit / prix libre (à confirmer)';
+  }
+  const tags = inferTags(hay);
+  return normalizeEvent({
+    source: 'chamblon',
+    title,
+    startDate,
+    endDate,
+    locationName,
+    locationText: [locationName, city].filter(Boolean).join(', '),
+    city,
+    url,
+    description,
+    ageText,
+    priceText,
+    tags,
+    officialSources: [url].filter(Boolean),
+    sourceProvenance: 'Commune de Chamblon — agenda communal (WordPress / The Events Calendar, WP REST /wp-json/tribe/events/v1)',
+    evidence: clean([
+      title,
+      startDate && `début ${startDate}`,
+      endDate && `fin ${endDate}`,
+      city && `lieu ${locationName} (${city})`,
+      catText && `catégories ${catText}`,
+      priceText && `prix ${priceText}`,
+      description
+    ].filter(Boolean).join(' | '))
+  });
+}
+
+async function scrapeChamblon() {
+  const today = isoDateZurich(new Date().toISOString().slice(0, 10)) || new Date().toISOString().slice(0, 10);
+  const startDate = today.slice(0, 10);
+  const events = [];
+  try {
+    let url = `${SOURCES.chamblon.apiUrl}?per_page=50&start_date=${startDate}`;
+    for (let page = 0; page < 6 && url; page++) {
+      const payload = await fetchEmoiJson(url, 30000);
+      const list = Array.isArray(payload && payload.events) ? payload.events : [];
+      for (const raw of list) {
+        if (!raw || !raw.title) continue;
+        const ev = parseChamblonEvent(raw, { baseUrl: SOURCES.chamblon.baseUrl });
+        if (ev && ev.startDate) events.push(ev);
+      }
+      url = payload && payload.next_rest_url ? payload.next_rest_url : null;
+    }
+  } catch (e) {
+    return [{ source: 'chamblon', title: 'Commune de Chamblon agenda', url: SOURCES.chamblon.url, error: e.message }];
+  }
+  return uniqBy(events, e => e.url || e.id);
+}
+
+// --- Val-de-Travers — agenda régional « vallon.info » (WordPress / EventON) ----
+// La page /agenda/ liste chaque événement dans un box `.eventon_list_event` qui
+// embarque un schema.org Event JSON-LD (name / description / startDate / endDate /
+// image) + les attributs de localisation (`data-location_name`/`data-location_address`
+// avec NPA+village). La date/heure vient du JSON-LD, qui porte l'heure LOCALE voulue
+// (« 2026-8-29T15:00+2:00 » ou « 2026-9-15 » pour un all-day). On IGNORE volontairement
+// le `data-time` unix d'EventON : il est incohérent d'un événement à l'autre (tantôt
+// vrai instant UTC, tantôt heure murale stockée comme UTC), donc non fiable. Le cinéma
+// (Colisée, un id répété) et les matchs de foot de ligue polluent l'agenda : on les
+// écarte (voir scrapeValDeTravers).
+const VDT_VILLAGES = ['Môtiers', 'Fleurier', 'Couvet', 'Travers', 'Noiraigue', 'Boveresse', 'Buttes', 'Les Verrières', 'La Côte-aux-Fées', 'Les Bayards', 'Saint-Sulpice'];
+
+function valDeTraversCity(locationAddress = '', locationName = '') {
+  const hay = `${locationAddress} ${locationName}`;
+  for (const v of VDT_VILLAGES) {
+    if (new RegExp(v.replace(/[-'’ ]/g, '.'), 'i').test(hay)) return v;
+  }
+  const npa = /\b\d{4}\s+([A-Za-zÀ-ÿ'’.\-]+(?:[ ]?[A-Za-zÀ-ÿ'’.\-]+)?)/.exec(locationAddress);
+  if (npa) return clean(npa[1]).split(/[,/(]/)[0].trim();
+  return 'Val-de-Travers';
+}
+
+// EventON's schema.org JSON-LD uses non-zero-padded parts and a loose offset
+// (« 2026-8-29T15:00+2:00 », or a bare date « 2026-9-15 » for all-day). We take the
+// wall-clock date/time as authoritative and re-attach the canonical DST-aware Zurich
+// offset. Returns { date, iso, timed } or null.
+function parseEventonJsonLdDate(s) {
+  const m = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:T(\d{1,2}):(\d{2}))?/.exec(clean(s));
+  if (!m) return null;
+  const date = `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  if (m[4] == null) return { date, iso: date, timed: false };
+  return { date, iso: `${date}T${m[4].padStart(2, '0')}:${m[5]}:00${zurichOffsetForDate(date)}`, timed: true };
+}
+
+function extractValDeTraversListings(html, pageUrl = SOURCES.valDeTravers.url) {
+  const $ = cheerio.load(html);
+  // schema.org Event JSON-LD blocks, keyed by EventON event id (`event_<id>_0`).
+  const ld = {};
+  $('script[type="application/ld+json"]').each((_, el) => {
+    let json;
+    try { json = JSON.parse(clean($(el).contents().text() || $(el).text())); } catch { return; }
+    for (const it of (Array.isArray(json) ? json : [json])) {
+      if (!it || it['@type'] !== 'Event') continue;
+      const m = /event_(\d+)_/.exec(it['@id'] || '');
+      if (m) ld[m[1]] = it;
+    }
+  });
+  const rows = [];
+  const seen = new Set();
+  $('.eventon_list_event').each((_, el) => {
+    const box = $(el);
+    const id = clean(box.attr('data-event_id') || '');
+    if (!id || seen.has(id)) return; // cinema and repeats share one id → collapse
+    seen.add(id);
+    const locAttrs = box.find('.event_location_attrs').first();
+    const locBox = box.find('.evcal_location').first();
+    const locationName = clean(locAttrs.attr('data-location_name') || locBox.attr('data-n') || '');
+    const locationAddress = clean(locAttrs.attr('data-location_address') || locBox.attr('data-add_str') || '');
+    const locationUrl = clean(locAttrs.attr('data-location_url') || '');
+    const meta = ld[id] || {};
+    const url = canonicalUrl(box.find('a[itemprop="url"]').attr('href') || meta.url || '', pageUrl);
+    const title = decodeHtmlEntities(clean(meta.name || box.find('.evcal_event_title').first().text() || ''));
+    const jsonStart = clean(meta.startDate || box.find('meta[itemprop="startDate"]').attr('content') || '');
+    const jsonEnd = clean(meta.endDate || box.find('meta[itemprop="endDate"]').attr('content') || '');
+    const description = decodeHtmlEntities(htmlToText(meta.description || ''));
+    const image = clean(meta.image || box.find('meta[itemprop="image"]').attr('content') || '');
+    const isCinema = /cinema-colisee/i.test(url) || /cin[ée]ma\s*colis[ée]e/i.test(locationName);
+    rows.push({ id, url, title, jsonStart, jsonEnd, description, image, locationName, locationAddress, locationUrl, isCinema });
+  });
+  return rows;
+}
+
+function valDeTraversEventFromRow(row) {
+  const start = parseEventonJsonLdDate(row.jsonStart);
+  if (!start) return null;
+  const startDate = start.iso;
+  const end = parseEventonJsonLdDate(row.jsonEnd);
+  // Keep a date-level end only for genuine multi-day items; same-day ends collapse.
+  const endDate = end && end.date && end.date !== start.date ? end.date : null;
+  const city = valDeTraversCity(row.locationAddress, row.locationName);
+  const locationText = clean([row.locationName, row.locationAddress || city].filter(Boolean).join(', ')) || city;
+  const hay = `${row.title} ${row.description} ${row.locationName}`;
+  const ageText = /famille|enfants?|jeune public|tout public|d[èe]s\s*\d|d[èe]s\s*le plus jeune/i.test(hay)
+    ? 'famille / tout public mentionné'
+    : '';
+  let priceText = '';
+  if (/gratuit|entr[ée]e libre|libre participation|au chapeau|prix libre|acc[èe]s libre/i.test(hay)) {
+    priceText = 'Gratuit / entrée libre (à confirmer)';
+  }
+  const officialSources = [row.url, row.locationUrl].filter(Boolean);
+  return normalizeEvent({
+    source: 'valDeTravers',
+    title: row.title,
+    startDate,
+    endDate,
+    locationName: row.locationName || city,
+    locationText,
+    city,
+    url: row.url,
+    description: row.description,
+    ageText,
+    priceText,
+    tags: inferTags(hay),
+    officialSources,
+    sourceProvenance: `Val-de-Travers — agenda vallon.info (WordPress / EventON)${row.locationName ? `, ${row.locationName}` : ''}`,
+    evidence: clean([
+      row.title,
+      startDate && `début ${startDate}`,
+      endDate && `fin ${endDate}`,
+      city && `lieu ${row.locationName ? `${row.locationName} (${city})` : city}`,
+      priceText && `prix ${priceText}`,
+      row.description
+    ].filter(Boolean).join(' | ')).slice(0, 1200)
+  });
+}
+
+// Best-effort event_type lookup via the public WP REST API to drop cinema (1275)
+// and league-sport (78) noise. Returns { <id>: [typeIds] }; empty on any failure.
+async function fetchValDeTraversTypes(ids) {
+  const uniq = [...new Set(ids.filter(Boolean))];
+  if (!uniq.length) return {};
+  try {
+    const url = `${SOURCES.valDeTravers.apiUrl}?include=${uniq.join(',')}&per_page=100&_fields=id,event_type`;
+    const data = await fetchEmoiJson(url, 25000);
+    const map = {};
+    if (Array.isArray(data)) {
+      for (const e of data) map[String(e.id)] = Array.isArray(e.event_type) ? e.event_type : [];
+    }
+    return map;
+  } catch {
+    return {};
+  }
+}
+
+async function scrapeValDeTravers() {
+  let html;
+  try {
+    html = await fetchHtml(SOURCES.valDeTravers.url, 35000);
+  } catch (e) {
+    return [{ source: 'valDeTravers', title: 'Agenda Val-de-Travers (vallon.info)', url: SOURCES.valDeTravers.url, error: e.message }];
+  }
+  const rows = extractValDeTraversListings(html, SOURCES.valDeTravers.url)
+    .filter(r => !r.isCinema && r.title && r.startUnix);
+  const typeById = await fetchValDeTraversTypes(rows.map(r => r.id));
+  const EXCLUDE_TYPES = new Set([78, 1275]); // sports (league matches) + cinéma
+  const today = new Date().toISOString().slice(0, 10);
+  const events = [];
+  for (const r of rows) {
+    const types = typeById[r.id];
+    if (Array.isArray(types) && types.length && types.every(t => EXCLUDE_TYPES.has(Number(t)))) continue;
+    // Fallback heuristic when the type API is unavailable: drop league match noise.
+    if (!types && (/\b(FC|HC|FSG|VBC)\b.*[-–]/i.test(r.title) || /\(\s*\d+e?\s*(?:ligue)?\s*\)/i.test(r.title))) continue;
+    const ev = valDeTraversEventFromRow(r);
+    if (ev && ev.startDate && (ev.endDate || ev.startDate).slice(0, 10) >= today) events.push(ev);
+  }
+  return uniqBy(events, e => e.url || e.id);
+}
+
 // --- FribourgRégion / Terroir Fribourg — Broye & Lac de Morat (WP REST) -------
 // fribourg.ch (ex fribourgregion.ch) exposes an `event` post type on its public
 // WP REST API. The canton-wide list is 845 events, so we scope by the `region`
@@ -5723,7 +6028,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, valDeTravers: scrapeValDeTravers });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -6563,6 +6868,90 @@ async function runFixtureTests() {
   });
   assert(/famille|tout public/i.test(pomyFamily.ageText), 'Pomy intergénérationnel should flag a family / tout public cue');
 
+  // Commune de Chamblon — same Tribe REST shape, no category taxonomy, empty
+  // venue → default city Chamblon. Timed event keeps DST-aware start + endDate null.
+  const chamblonTimed = parseChamblonEvent({
+    all_day: false,
+    title: 'Sortie des a&#238;n&#233;s et du personnel communal',
+    start_date: '2026-09-16 08:30:00',
+    start_date_details: { year: '2026', month: '09', day: '16', hour: '08', minutes: '30', seconds: '00' },
+    end_date_details: { year: '2026', month: '09', day: '16', hour: '17', minutes: '00', seconds: '00' },
+    url: 'https://chamblon.ch/event/sortie-des-aines/',
+    venue: [],
+    cost: '',
+    cost_details: { values: [] },
+    categories: [],
+    description: ''
+  });
+  assert.strictEqual(chamblonTimed.source, 'chamblon');
+  assert.strictEqual(chamblonTimed.title, 'Sortie des aînés et du personnel communal', 'Chamblon title should be HTML-entity decoded');
+  assert.strictEqual(chamblonTimed.startDate, '2026-09-16T08:30:00+02:00', 'Chamblon timed event keeps a DST-aware Zurich start');
+  assert.strictEqual(chamblonTimed.endDate, null, 'Chamblon same-day timed event keeps no end date');
+  assert.strictEqual(chamblonTimed.city, 'Chamblon', 'Chamblon defaults city to Chamblon when venue is empty');
+  assert.strictEqual(estimateDistanceKm(chamblonTimed), 4, 'Chamblon should resolve to 4 km from Yverdon');
+  assert.strictEqual(chamblonTimed.url, 'https://chamblon.ch/event/sortie-des-aines/', 'Chamblon keeps the stable /event/ URL');
+  // All-day multi-day village fête: Tribe bounds the end just after midnight of the
+  // day after → roll back to the last real day; family cue picked up from the title.
+  const chamblonFete = parseChamblonEvent({
+    all_day: true,
+    title: 'F&#234;te du village en famille',
+    start_date: '2026-06-13 00:00:00',
+    start_date_details: { year: '2026', month: '06', day: '13', hour: '00', minutes: '00', seconds: '00' },
+    end_date_details: { year: '2026', month: '06', day: '15', hour: '01', minutes: '59', seconds: '59' },
+    url: 'https://chamblon.ch/event/fete-du-village/',
+    venue: [],
+    cost_details: { values: [] },
+    categories: [],
+    description: '<p>Marché du terroir, entrée libre, tout public.</p>'
+  });
+  assert.strictEqual(chamblonFete.startDate, '2026-06-13', 'Chamblon all-day fête keeps a date-level start');
+  assert.strictEqual(chamblonFete.endDate, '2026-06-14', 'Chamblon all-day multi-day end should roll back to the last real day');
+  assert(/famille|tout public/i.test(chamblonFete.ageText), 'Chamblon fête should flag a family / tout public cue');
+  assert(/gratuit|libre/i.test(chamblonFete.priceText), 'Chamblon « entrée libre » should surface a free price hint');
+
+  // Val-de-Travers (vallon.info / EventON): parse a timed family event + an all-day
+  // village fête from the agenda box (data-time unix + schema.org JSON-LD), resolve
+  // the deep-vallon city from the NPA address, and drop cinema / league-sport noise.
+  const vdtHtml = `<div id='evcal_list'>
+    <div class="eventon_list_event evo_eventtop" data-event_id="51889" data-time="1788015600-1788026400" itemscope itemtype='http://schema.org/Event'>
+      <a itemprop='url' href='https://vallon.info/events/boom-pour-les-enfants-et-soiree-all-style/'></a>
+      <span class='event_location_attrs' data-location_address="Salle de spectacles, 2114 Fleurier" data-location_name="Salle de spectacles" data-location_url="https://vallon.info/event-location/salle-de-spectacles/"></span>
+      <em class="evcal_location" data-add_str="Salle de spectacles, 2114 Fleurier" data-n="Salle de spectacles"></em>
+      <span class="evcal_event_title">Boom pour les enfants et soirée all style</span>
+      <script type="application/ld+json">{"@context":"http://schema.org","@type":"Event","@id":"event_51889_0","name":"Boom pour les enfants et soirée all style","url":"https://vallon.info/events/boom-pour-les-enfants-et-soiree-all-style/","startDate":"2026-8-29T15:00+2:00","endDate":"2026-8-30T04:00+2:00","description":"<p>Boom enfants (GRATUIT) de 15h00 à 18h00, une boom pour les enfants.</p>"}</script>
+    </div>
+    <div class="eventon_list_event evo_eventtop" data-event_id="52001" itemscope itemtype='http://schema.org/Event'>
+      <a itemprop='url' href='https://vallon.info/events/fete-de-village-noiraigue/'></a>
+      <span class='event_location_attrs' data-location_address="Place du village, 2103 Noiraigue" data-location_name="Place du village"></span>
+      <script type="application/ld+json">{"@context":"http://schema.org","@type":"Event","@id":"event_52001_0","name":"F&#234;te de village","url":"https://vallon.info/events/fete-de-village-noiraigue/","startDate":"2026-9-15","description":"<p>Marché du terroir, tout public, entrée libre.</p>"}</script>
+    </div>
+    <div class="eventon_list_event evo_eventtop" data-event_id="30999" itemscope itemtype='http://schema.org/Event'>
+      <a itemprop='url' href='https://vallon.info/events/cinema-colisee/var/ri-837.l-L1'></a>
+      <span class='event_location_attrs' data-location_name="Cinéma Colisée"></span>
+      <script type="application/ld+json">{"@context":"http://schema.org","@type":"Event","@id":"event_30999_0","name":"Cinéma Colisée","url":"https://vallon.info/events/cinema-colisee/","startDate":"2026-8-20"}</script>
+    </div>
+  </div>`;
+  const vdtRows = extractValDeTraversListings(vdtHtml, SOURCES.valDeTravers.url);
+  assert.strictEqual(vdtRows.length, 3, 'Val-de-Travers should read all three agenda boxes');
+  assert(vdtRows.find(r => r.id === '30999').isCinema, 'Cinéma Colisée box should be flagged as cinema');
+  // JSON-LD wall-clock date is authoritative (data-time unix is ignored: inconsistent).
+  assert.strictEqual(parseEventonJsonLdDate('2026-8-29T15:00+2:00').iso, '2026-08-29T15:00:00+02:00', 'EventON JSON-LD date keeps the local wall-clock time with a canonical Zurich offset');
+  assert.strictEqual(parseEventonJsonLdDate('2026-1-5').iso, '2026-01-05', 'EventON bare-date JSON-LD is treated as all-day (date-level)');
+  const vdtBoom = valDeTraversEventFromRow(vdtRows.find(r => r.id === '51889'));
+  assert.strictEqual(vdtBoom.source, 'valDeTravers');
+  assert.strictEqual(vdtBoom.startDate, '2026-08-29T15:00:00+02:00', 'Val-de-Travers timed event uses the JSON-LD wall-clock start in Europe/Zurich');
+  assert.strictEqual(vdtBoom.endDate, '2026-08-30', 'Val-de-Travers after-midnight end keeps a date-level end on the next day');
+  assert.strictEqual(vdtBoom.city, 'Fleurier', 'Val-de-Travers city resolves from the NPA address village');
+  assert.strictEqual(estimateDistanceKm(vdtBoom), 19, 'Fleurier should resolve to 19 km from Yverdon');
+  assert(/famille|tout public/i.test(vdtBoom.ageText), 'Boom pour les enfants should flag a family cue');
+  assert(/gratuit|libre/i.test(vdtBoom.priceText), 'Boom (GRATUIT) should keep a free-entry evidence');
+  const vdtFete = valDeTraversEventFromRow(vdtRows.find(r => r.id === '52001'));
+  assert.strictEqual(vdtFete.title, 'Fête de village', 'Val-de-Travers all-day title is HTML-entity decoded');
+  assert.strictEqual(vdtFete.startDate, '2026-09-15', 'Val-de-Travers all-day event keeps a date-level start');
+  assert.strictEqual(vdtFete.endDate, null, 'Val-de-Travers single all-day event keeps no end date');
+  assert.strictEqual(vdtFete.city, 'Noiraigue', 'Val-de-Travers all-day city resolves to Noiraigue');
+  assert.strictEqual(estimateDistanceKm(vdtFete), 26, 'Noiraigue should resolve to 26 km from Yverdon');
+
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -6796,4 +7185,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers };
