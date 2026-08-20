@@ -26,6 +26,7 @@ const LOCATION_KM_FROM_YVERDON = {
   chavornay: 13,
   pomy: 4,
   chamblon: 4,
+  mathod: 8,
   'essert-pittet': 15,
   'la sarraz': 15,
   'sainte-croix': 23,
@@ -623,6 +624,23 @@ const SOURCES = {
     apiUrl: 'https://chamblon.ch/wp-json/tribe/events/v1/events',
     baseUrl: 'https://chamblon.ch',
     kind: 'wordpress-the-events-calendar-rest-chamblon'
+  },
+  mathod: {
+    // Commune de Mathod (village viticole/agricole du Nord vaudois, ~8 km au
+    // sud-ouest d'Yverdon, sur la plaine de l'Orbe entre Yverdon et Orbe) :
+    // agenda communal des manifestations — fêtes de village (ex. « Fête de
+    // l'Eglise de Mathod »), séances officielles, votations. Commune encore
+    // NON couverte (distincte de pomy/chamblon/chavornay/champvent/grandson/
+    // orbe). Plateforme : WordPress + « The Events Calendar » (Tribe) exposant
+    // l'API REST publique /wp-json/tribe/events/v1/events (même pattern que
+    // chateauLaSarraz/pomy/chamblon, en www.). Calendrier léger → on prend tout
+    // l'agenda à venir sans scoping de catégorie (les events publics sont taggés
+    // « Officiel » comme la fête de l'église). venue est un objet Tribe (sans
+    // city ici) → ville par défaut Mathod.
+    url: 'https://www.mathod.ch/events/',
+    apiUrl: 'https://www.mathod.ch/wp-json/tribe/events/v1/events',
+    baseUrl: 'https://www.mathod.ch',
+    kind: 'wordpress-the-events-calendar-rest-mathod'
   },
   valDeTravers: {
     // Val-de-Travers — agenda régional « vallon.info » (Neuchâtel, ~19-26 km d'Yverdon
@@ -3722,6 +3740,101 @@ async function scrapeChamblon() {
   return uniqBy(events, e => e.url || e.id);
 }
 
+// --- Commune de Mathod — agenda communal (WordPress / The Events Calendar) -----
+// Même plateforme Tribe que chateauLaSarraz / pomy / chamblon : on réutilise les
+// helpers génériques laSarrazDayFromDetails / laSarrazPrice. Calendrier léger et
+// sans saturation de réservations → on prend tout l'agenda à venir sans scoping.
+// venue est un objet Tribe (sans champ city ici) → ville par défaut Mathod.
+function parseMathodEvent(raw, opts = {}) {
+  const base = opts.baseUrl || SOURCES.mathod.baseUrl;
+  const allDay = raw.all_day === true || raw.all_day === '1' || raw.all_day === 'yes';
+  const startDay = laSarrazDayFromDetails(raw.start_date_details);
+  if (!startDay) return null;
+  let endDay = laSarrazDayFromDetails(raw.end_date_details);
+  // Tribe borne les all-day à 23:59:59 du même jour (ou juste après minuit du
+  // lendemain) : replier une fin < 3h sur le jour précédent.
+  if (allDay && endDay && raw.end_date_details && Number(raw.end_date_details.hour) < 3) {
+    const dt = new Date(`${endDay}T12:00:00Z`);
+    dt.setUTCDate(dt.getUTCDate() - 1);
+    endDay = dt.toISOString().slice(0, 10);
+  }
+  let startDate;
+  let endDate = null;
+  if (allDay) {
+    startDate = startDay;
+    endDate = endDay && endDay !== startDay ? endDay : null;
+  } else {
+    const sd = raw.start_date_details || {};
+    startDate = isoDateZurich(startDay, `${sd.hour || ''}:${sd.minutes || '00'}`);
+    endDate = endDay && endDay !== startDay ? endDay : null;
+  }
+  const title = decodeHtmlEntities(raw.title || '');
+  const venue = raw.venue && typeof raw.venue === 'object' && !Array.isArray(raw.venue) ? raw.venue : {};
+  const locationName = clean(venue.venue || '') || 'Mathod';
+  const city = clean(venue.city || '') || 'Mathod';
+  const categories = (raw.categories || []).map(c => clean(c && c.name)).filter(Boolean);
+  const tagLabels = (raw.tags || []).map(t => clean(t && t.name)).filter(Boolean);
+  const catText = [...new Set([...categories, ...tagLabels])].join(', ');
+  const description = decodeHtmlEntities(raw.description || raw.excerpt || '');
+  const url = canonicalUrl(raw.url || raw.rest_url || '', base);
+  const hay = `${title} ${description} ${catText}`;
+  const ageText = /famille|enfants?|jeune public|tout public|intergén|d[èe]s \d/i.test(hay)
+    ? 'famille / tout public mentionné'
+    : '';
+  let priceText = laSarrazPrice(raw);
+  if (!priceText && /gratuit|entr[ée]e libre|chapeau|prix libre/i.test(hay)) {
+    priceText = 'Gratuit / prix libre (à confirmer)';
+  }
+  const tags = inferTags(hay);
+  return normalizeEvent({
+    source: 'mathod',
+    title,
+    startDate,
+    endDate,
+    locationName,
+    locationText: [locationName, city].filter(Boolean).join(', '),
+    city,
+    url,
+    description,
+    ageText,
+    priceText,
+    tags,
+    officialSources: [url].filter(Boolean),
+    sourceProvenance: 'Commune de Mathod — agenda communal (WordPress / The Events Calendar, WP REST /wp-json/tribe/events/v1)',
+    evidence: clean([
+      title,
+      startDate && `début ${startDate}`,
+      endDate && `fin ${endDate}`,
+      city && `lieu ${locationName} (${city})`,
+      catText && `catégories ${catText}`,
+      priceText && `prix ${priceText}`,
+      description
+    ].filter(Boolean).join(' | '))
+  });
+}
+
+async function scrapeMathod() {
+  const today = isoDateZurich(new Date().toISOString().slice(0, 10)) || new Date().toISOString().slice(0, 10);
+  const startDate = today.slice(0, 10);
+  const events = [];
+  try {
+    let url = `${SOURCES.mathod.apiUrl}?per_page=50&start_date=${startDate}`;
+    for (let page = 0; page < 6 && url; page++) {
+      const payload = await fetchEmoiJson(url, 30000);
+      const list = Array.isArray(payload && payload.events) ? payload.events : [];
+      for (const raw of list) {
+        if (!raw || !raw.title) continue;
+        const ev = parseMathodEvent(raw, { baseUrl: SOURCES.mathod.baseUrl });
+        if (ev && ev.startDate) events.push(ev);
+      }
+      url = payload && payload.next_rest_url ? payload.next_rest_url : null;
+    }
+  } catch (e) {
+    return [{ source: 'mathod', title: 'Commune de Mathod agenda', url: SOURCES.mathod.url, error: e.message }];
+  }
+  return uniqBy(events, e => e.url || e.id);
+}
+
 // --- Val-de-Travers — agenda régional « vallon.info » (WordPress / EventON) ----
 // La page /agenda/ liste chaque événement dans un box `.eventon_list_event` qui
 // embarque un schema.org Event JSON-LD (name / description / startDate / endDate /
@@ -6028,7 +6141,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, valDeTravers: scrapeValDeTravers });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, valDeTravers: scrapeValDeTravers });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -6909,6 +7022,50 @@ async function runFixtureTests() {
   assert(/famille|tout public/i.test(chamblonFete.ageText), 'Chamblon fête should flag a family / tout public cue');
   assert(/gratuit|libre/i.test(chamblonFete.priceText), 'Chamblon « entrée libre » should surface a free price hint');
 
+  // Commune de Mathod — same Tribe REST shape (in www.). Timed village event with a
+  // venue object that has a name but no city → defaults to Mathod; named entity
+  // (&rsquo;) is decoded; August start keeps a DST-aware +02:00 offset; 8 km resolved.
+  const mathodTimed = parseMathodEvent({
+    all_day: false,
+    title: 'F&#234;te de l&rsquo;Eglise de Mathod',
+    start_date: '2026-08-22 11:00:00',
+    start_date_details: { year: '2026', month: '08', day: '22', hour: '11', minutes: '00', seconds: '00' },
+    end_date_details: { year: '2026', month: '08', day: '22', hour: '11', minutes: '00', seconds: '00' },
+    url: 'https://www.mathod.ch/event/fete-de-leglise-de-mathod/',
+    venue: { venue: 'Eglise de Mathod', slug: 'eglise-de-mathod' },
+    cost: '',
+    cost_details: { values: [] },
+    categories: [{ name: 'Officiel', slug: 'officiel' }],
+    description: ''
+  });
+  assert.strictEqual(mathodTimed.source, 'mathod');
+  assert.strictEqual(mathodTimed.title, 'Fête de l’Eglise de Mathod', 'Mathod title should decode numeric + named HTML entities');
+  assert.strictEqual(mathodTimed.startDate, '2026-08-22T11:00:00+02:00', 'Mathod timed event keeps a DST-aware Zurich start');
+  assert.strictEqual(mathodTimed.endDate, null, 'Mathod same-day timed event keeps no end date');
+  assert.strictEqual(mathodTimed.city, 'Mathod', 'Mathod defaults city to Mathod when the venue object has no city');
+  assert.strictEqual(mathodTimed.locationName, 'Eglise de Mathod', 'Mathod keeps the venue name from the Tribe venue object');
+  assert.strictEqual(estimateDistanceKm(mathodTimed), 8, 'Mathod should resolve to 8 km from Yverdon');
+  assert.strictEqual(mathodTimed.url, 'https://www.mathod.ch/event/fete-de-leglise-de-mathod/', 'Mathod keeps the stable /event/ URL');
+  // All-day multi-day fête with a venue object carrying a city + family/free cues:
+  // end rolls back to the last real day, city comes from the venue, cues surface.
+  const mathodFete = parseMathodEvent({
+    all_day: true,
+    title: 'Marché villageois en famille',
+    start_date: '2026-09-19 00:00:00',
+    start_date_details: { year: '2026', month: '09', day: '19', hour: '00', minutes: '00', seconds: '00' },
+    end_date_details: { year: '2026', month: '09', day: '21', hour: '01', minutes: '59', seconds: '59' },
+    url: 'https://www.mathod.ch/event/marche-villageois/',
+    venue: { venue: 'Place du Village', city: 'Mathod' },
+    cost_details: { values: [] },
+    categories: [],
+    description: '<p>Produits du terroir, entrée libre, tout public.</p>'
+  });
+  assert.strictEqual(mathodFete.startDate, '2026-09-19', 'Mathod all-day fête keeps a date-level start');
+  assert.strictEqual(mathodFete.endDate, '2026-09-20', 'Mathod all-day multi-day end should roll back to the last real day');
+  assert.strictEqual(mathodFete.city, 'Mathod', 'Mathod reads the city from the Tribe venue object when present');
+  assert(/famille|tout public/i.test(mathodFete.ageText), 'Mathod fête should flag a family / tout public cue');
+  assert(/gratuit|libre/i.test(mathodFete.priceText), 'Mathod « entrée libre » should surface a free price hint');
+
   // Val-de-Travers (vallon.info / EventON): parse a timed family event + an all-day
   // village fête from the agenda box (data-time unix + schema.org JSON-LD), resolve
   // the deep-vallon city from the NPA address, and drop cinema / league-sport noise.
@@ -7185,4 +7342,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers };
