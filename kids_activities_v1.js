@@ -141,6 +141,23 @@ const LOCATION_KM_FROM_YVERDON = {
   auvernier: 37,
   portalban: 38,
   peseux: 39,
+  // Vaudfamille (agenda famille cantonal) — communes Nord vaudois / Broye / Gros-de-Vaud
+  // en scope observées ou proches, non déjà listées. Distances routières approx. depuis
+  // Yverdon. Sert au géo-scoping du scraper vaudfamille (rayon <= 35 km) + scoring aval.
+  vuiteboeuf: 12,
+  'champ-pittet': 5,
+  baulmes: 12,
+  bavois: 14,
+  suchy: 12,
+  'valeyres-sous-rances': 15,
+  'forel-sur-lucens': 22,
+  'forel sur lucens': 22,
+  lucens: 20,
+  moudon: 27,
+  'etagnieres': 26,
+  'étagnières': 26,
+  bournens: 30,
+  pampigny: 33,
   geneve: 85,
   genève: 85
 };
@@ -665,6 +682,27 @@ const SOURCES = {
     apiUrl: 'https://vallon.info/wp-json/wp/v2/ajde_events',
     baseUrl: 'https://vallon.info',
     kind: 'wordpress-eventon-valdetravers-regional-agenda'
+  },
+  vaudfamille: {
+    // Vaudfamille — « le site des familles dans le canton de Vaud » : agenda
+    // familial cantonal (spectacles, ateliers, expos, fermes, contes, sorties
+    // nature) avec, chose rare parmi nos sources, une VRAIE évidence d'âge par
+    // événement (label `.dphage` : « 4 - 10 ans », « dès 6 ans », « Tout public »).
+    // Distinct des DMO/communes : agenda éditorialisé famille, souvent des lieux/
+    // activités non relayés ailleurs. Portail qsPortal (QuickSite) : la page
+    // /N600040/agenda-spectacles-loisirs-trocs.html est un formulaire GET
+    // (dtmFrom/dtmTo en DD.MM.YYYY + `search=Rechercher`) qui rend côté serveur
+    // des cartes `.list-item` (href fiche, `.dphage` âge, `abbr.date-from|date-to`
+    // en YYYY-MM-DD date-level, `.summary` titre, `p>small` lieu-nom, `.location`
+    // « Ville - détail »), paginées via `Page_0`. L'agenda est CANTONAL (~1000
+    // events, surtout Lausanne/Riviera/Genève) → on GÉO-SCOPE côté scraper au
+    // rayon Nord vaudois/Broye/Gros-de-Vaud (estimateDistanceKm <= 35 km) et on
+    // borne fenêtre + pages ; les lieux hors table de distances sont écartés
+    // (gap documenté). Dates date-level sans heure (heure/prix éventuels sur la
+    // fiche, laissés à la couche d'enrichissement conditionnel en aval).
+    url: 'https://www.vaudfamille.ch/N600040/agenda-spectacles-loisirs-trocs.html',
+    baseUrl: 'https://www.vaudfamille.ch',
+    kind: 'qsportal-vaud-family-agenda'
   },
   manualJohan: {
     url: 'manual://johan/kids-activities',
@@ -3993,6 +4031,121 @@ async function scrapeValDeTravers() {
   return uniqBy(events, e => e.url || e.id);
 }
 
+// --- Vaudfamille — agenda famille cantonal vaudois (portail qsPortal) ----------
+// Portail QuickSite : /N600040/agenda-spectacles-loisirs-trocs.html est un
+// formulaire GET qui rend côté serveur des cartes `.list-item` (âge `.dphage`,
+// `abbr.date-from|date-to` en YYYY-MM-DD date-level, `.summary` titre, `p>small`
+// lieu-nom, `.location` « Ville - détail »), paginé via `Page_0`. L'agenda étant
+// CANTONAL (~1000 events, majorité Lausanne/Riviera/Genève), on borne fenêtre +
+// pages et on GÉO-SCOPE au rayon Nord vaudois/Broye/Gros-de-Vaud (<= 35 km) via
+// estimateDistanceKm ; les lieux hors table de distances sont écartés (gap).
+const VAUDFAMILLE_MAX_PAGES = 15;
+const VAUDFAMILLE_WINDOW_DAYS = 90;
+const VAUDFAMILLE_MAX_KM = 35;
+const VAUDFAMILLE_PAGE_CONCURRENCY = 4;
+
+// DD.MM.YYYY for the dtmFrom/dtmTo query params, from a 'YYYY-MM-DD' string.
+function vaudfamilleDateParam(iso) {
+  const [y, m, d] = iso.slice(0, 10).split('-');
+  return `${d}.${m}.${y}`;
+}
+
+function vaudfamilleSearchUrl(fromIso, toIso, page) {
+  const base = SOURCES.vaudfamille.url;
+  const qs = `dtmFrom=${vaudfamilleDateParam(fromIso)}&dtmTo=${vaudfamilleDateParam(toIso)}&search=Rechercher&Page_0=${page}`;
+  return `${base}?${qs}`;
+}
+
+// The pager exposes a "Last" link `<a href="#p67" aria-label="Last">`; fall back to
+// the highest `#p<N>` fragment, else 1.
+function parseVaudfamilleLastPage(html) {
+  const $ = cheerio.load(html);
+  let last = 1;
+  $('ul.pagination a[href^="#p"]').each((_, a) => {
+    const m = ($(a).attr('href') || '').match(/#p(\d+)/);
+    if (m) last = Math.max(last, Number(m[1]));
+  });
+  return last;
+}
+
+// Parse the server-rendered `.list-item` cards of one results page.
+function extractVaudfamilleListings(html, baseUrl = SOURCES.vaudfamille.baseUrl) {
+  const $ = cheerio.load(html);
+  const items = [];
+  $('a.list-item').each((_, el) => {
+    const $a = $(el);
+    const href = $a.attr('href') || '';
+    const title = clean($a.find('.summary').first().text());
+    const ageText = clean($a.find('.dphage').first().text());
+    const startDate = clean($a.find('abbr.date-from').first().attr('title') || '');
+    const endRaw = clean($a.find('abbr.date-to').first().attr('title') || '');
+    const venue = clean($a.find('.list-item-content p small').first().text());
+    const location = clean($a.find('.location').first().text());
+    if (!href || !title || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return;
+    const endDate = /^\d{4}-\d{2}-\d{2}$/.test(endRaw) && endRaw !== startDate ? endRaw : null;
+    // City = first segment before a " - "/" – " separator (else the whole label).
+    const city = clean(location.split(/\s+[-–]\s+/)[0] || location);
+    items.push({ url: canonicalUrl(href, baseUrl) || href, title, ageText, startDate, endDate, venue, location, city });
+  });
+  return items;
+}
+
+function vaudfamilleEventFromListing(l) {
+  const venue = l.venue || l.location || l.city;
+  const locationText = clean([l.venue, l.location].filter(Boolean).join(', ')) || l.city;
+  const hay = `${l.title} ${venue} ${l.ageText}`;
+  return normalizeEvent({
+    source: 'vaudfamille',
+    title: l.title,
+    startDate: l.startDate,
+    endDate: l.endDate,
+    locationName: venue,
+    locationText,
+    city: l.city,
+    url: l.url,
+    description: clean([venue && `Lieu: ${venue}`, l.ageText && `Public: ${l.ageText}`].filter(Boolean).join(' — ')),
+    ageText: l.ageText,
+    tags: inferTags(`${hay} famille enfants sortie activité`),
+    sourceProvenance: `Vaudfamille — agenda famille vaudois: ${l.url}`,
+    officialSources: uniqBy([l.url, SOURCES.vaudfamille.url].filter(Boolean), x => x),
+    evidence: clean([l.startDate, l.endDate, l.ageText, l.location, venue, l.title].filter(Boolean).join(' | ')).slice(0, 1200)
+  });
+}
+
+async function scrapeVaudfamille() {
+  const today = new Date().toISOString().slice(0, 10);
+  const toIso = new Date(Date.now() + VAUDFAMILLE_WINDOW_DAYS * 86400000).toISOString().slice(0, 10);
+  // Async fetch (never execFileSync here) so the ~15 page requests don't block the
+  // shared event loop / SOURCE_TIMEOUT guard; page 1 first to learn the real last
+  // page, then fetch the rest with bounded concurrency.
+  let firstHtml;
+  try {
+    firstHtml = await fetchHtml(vaudfamilleSearchUrl(today, toIso, 1), 20000);
+  } catch (e) {
+    return [{ source: 'vaudfamille', title: 'Agenda famille Vaudfamille', url: SOURCES.vaudfamille.url, error: e.message }];
+  }
+  const lastPage = Math.min(parseVaudfamilleLastPage(firstHtml), VAUDFAMILLE_MAX_PAGES);
+  const listings = extractVaudfamilleListings(firstHtml);
+  const pages = [];
+  for (let p = 2; p <= lastPage; p++) pages.push(p);
+  for (let i = 0; i < pages.length; i += VAUDFAMILLE_PAGE_CONCURRENCY) {
+    const batch = pages.slice(i, i + VAUDFAMILLE_PAGE_CONCURRENCY);
+    const htmls = await Promise.all(batch.map(p =>
+      fetchHtml(vaudfamilleSearchUrl(today, toIso, p), 20000).catch(() => null)));
+    for (const html of htmls) if (html) listings.push(...extractVaudfamilleListings(html));
+  }
+  const events = [];
+  for (const l of uniqBy(listings, x => x.url)) {
+    const ev = vaudfamilleEventFromListing(l);
+    if (!ev.startDate || (ev.endDate || ev.startDate).slice(0, 10) < today) continue;
+    // Géo-scope: on ne garde que les lieux résolus dans le rayon régional.
+    const km = estimateDistanceKm(ev);
+    if (km == null || km > VAUDFAMILLE_MAX_KM) continue;
+    events.push(ev);
+  }
+  return uniqBy(events, e => recommendationKey(e));
+}
+
 // --- FribourgRégion / Terroir Fribourg — Broye & Lac de Morat (WP REST) -------
 // fribourg.ch (ex fribourgregion.ch) exposes an `event` post type on its public
 // WP REST API. The canton-wide list is 845 events, so we scope by the `region`
@@ -6141,7 +6294,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, valDeTravers: scrapeValDeTravers });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -7109,6 +7262,67 @@ async function runFixtureTests() {
   assert.strictEqual(vdtFete.city, 'Noiraigue', 'Val-de-Travers all-day city resolves to Noiraigue');
   assert.strictEqual(estimateDistanceKm(vdtFete), 26, 'Noiraigue should resolve to 26 km from Yverdon');
 
+  // Vaudfamille (qsPortal family agenda): parse the server-rendered `.list-item`
+  // cards — age label, `abbr.date-from|date-to` (YYYY-MM-DD date-level), title,
+  // venue, "Ville - détail" location — and geo-scope to the regional radius. The
+  // fixture mixes a near single-day (Orbe), a near multi-day range (Vuiteboeuf),
+  // and a far card (Lausanne) that must be dropped by the scraper's geo filter.
+  const vfHtml = `<div class="row">
+    <div class="col-sm-6 col-md-4 ">
+      <a href="/N2345515/urba-byrinthe.html" class="list-item">
+        <div><span class="label dphage">4 - 12 ans</span><div class="list-item-image"><img></div></div>
+        <div class="list-item-content">
+          <div class="date"><abbr class="date-from" title="2026-08-22">22 Août 2026</abbr><abbr class="date-to" title=""> </abbr></div>
+          <div class="h4 summary" style="display:flex;"><i></i><div>Urba Byrinthe &#8211; parcours enfants</div></div>
+          <p><small>Urba Parc de loisirs</small></p>
+        </div>
+        <div class="list-item-footer"><span class="glyphicon glyphicon-map-marker"></span><span class="location">Orbe - Urba Parc</span></div>
+      </a>
+    </div>
+    <div class="col-sm-6 col-md-4 ">
+      <a href="/N999/karting-parents-enfants.html" class="list-item">
+        <div><span class="label dphage">dès 3 ans</span></div>
+        <div class="list-item-content">
+          <div class="date"><abbr class="date-from" title="2026-08-22">22 Août 2026</abbr><abbr class="date-to" title="2026-08-24">24 Août 2026</abbr></div>
+          <div class="h4 summary"><div>Karting parents/enfants en famille</div></div>
+          <p><small>Piste de karting</small></p>
+        </div>
+        <div class="list-item-footer"><span class="location">Vuiteboeuf</span></div>
+      </a>
+    </div>
+    <div class="col-sm-6 col-md-4 ">
+      <a href="/N111/musee-loin.html" class="list-item">
+        <div><span class="label dphage">7 ans - Adulte</span></div>
+        <div class="list-item-content">
+          <div class="date"><abbr class="date-from" title="2026-08-22">22 Août 2026</abbr></div>
+          <div class="h4 summary"><div>Expo lointaine</div></div>
+          <p><small>Musée Olympique</small></p>
+        </div>
+        <div class="list-item-footer"><span class="location">Lausanne - Musée Olympique</span></div>
+      </a>
+    </div>
+  </div>`;
+  const vfRows = extractVaudfamilleListings(vfHtml, SOURCES.vaudfamille.baseUrl);
+  assert.strictEqual(vfRows.length, 3, 'Vaudfamille should read all three list-item cards');
+  const vfOrbe = vaudfamilleEventFromListing(vfRows.find(r => r.city === 'Orbe'));
+  assert.strictEqual(vfOrbe.source, 'vaudfamille');
+  assert.strictEqual(vfOrbe.title, 'Urba Byrinthe – parcours enfants', 'Vaudfamille title decodes HTML entities');
+  assert.strictEqual(vfOrbe.startDate, '2026-08-22', 'Vaudfamille single-day card keeps a date-level start');
+  assert.strictEqual(vfOrbe.endDate, null, 'Vaudfamille empty date-to yields no end date');
+  assert.strictEqual(vfOrbe.ageMin, 4, 'Vaudfamille "4 - 12 ans" label yields ageMin 4');
+  assert.strictEqual(vfOrbe.ageMax, 12, 'Vaudfamille "4 - 12 ans" label yields ageMax 12');
+  assert.strictEqual(vfOrbe.city, 'Orbe', 'Vaudfamille city is the segment before " - "');
+  assert.strictEqual(estimateDistanceKm(vfOrbe), 12, 'Orbe should resolve to 12 km from Yverdon');
+  assert.strictEqual(vfOrbe.url, 'https://www.vaudfamille.ch/N2345515/urba-byrinthe.html', 'Vaudfamille builds an absolute detail URL');
+  const vfKart = vaudfamilleEventFromListing(vfRows.find(r => r.city === 'Vuiteboeuf'));
+  assert.strictEqual(vfKart.startDate, '2026-08-22', 'Vaudfamille range card keeps a date-level start');
+  assert.strictEqual(vfKart.endDate, '2026-08-24', 'Vaudfamille range card keeps the date-to end');
+  assert.strictEqual(vfKart.ageMin, 3, 'Vaudfamille "dès 3 ans" label yields ageMin 3');
+  assert.strictEqual(estimateDistanceKm(vfKart), 12, 'Vuiteboeuf should resolve to 12 km from Yverdon');
+  // Far card: kept by the parser but must be geo-dropped by the scraper radius.
+  const vfFar = vaudfamilleEventFromListing(vfRows.find(r => r.city === 'Lausanne'));
+  assert(estimateDistanceKm(vfFar) > VAUDFAMILLE_MAX_KM, 'Lausanne exceeds the Vaudfamille regional radius and is dropped');
+
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -7342,4 +7556,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille };
