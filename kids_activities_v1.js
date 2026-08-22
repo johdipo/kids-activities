@@ -158,6 +158,10 @@ const LOCATION_KM_FROM_YVERDON = {
   'étagnières': 26,
   bournens: 30,
   pampigny: 33,
+  // Cossonay (Gros-de-Vaud, chef-lieu de district au sud de La Sarraz) — agenda
+  // communal JEvents. Distance routière approx. depuis Yverdon (~8 km au sud de
+  // La Sarraz). Le hameau d'Allens fait partie de la commune → résolu via city Cossonay.
+  cossonay: 24,
   geneve: 85,
   genève: 85
 };
@@ -658,6 +662,28 @@ const SOURCES = {
     apiUrl: 'https://www.mathod.ch/wp-json/tribe/events/v1/events',
     baseUrl: 'https://www.mathod.ch',
     kind: 'wordpress-the-events-calendar-rest-mathod'
+  },
+  cossonay: {
+    // Commune de Cossonay (chef-lieu du district du Gros-de-Vaud, ~24 km au sud
+    // d'Yverdon, sur la colline dominant la plaine de la Venoge, reliée par le
+    // funiculaire depuis la gare CFF) : agenda communal des manifestations —
+    // fêtes de village en Vieille-Ville (CossGrill, Fête du 1er août à Allens),
+    // marchés, vide-greniers, ciné plein-air (TCS Ciné drive-in), portes ouvertes
+    // de jardins, soirées jeux. Bon fit famille / terroir / plein-air estival.
+    // Commune encore NON couverte (distincte de la-sarraz/chavornay/orbe/echallens).
+    // Plateforme : Joomla + composant « JEvents » — PAS d'API REST propre (l'export
+    // ICS renvoie 403/500), mais l'agenda est rendu côté serveur : les pages
+    // /agenda/month.calendar/YYYY/MM/DD/- listent des liens de fiche
+    // /agenda/icalrepeat.detail/YYYY/MM/DD/<id>/-/<slug> (la DATE de l'occurrence
+    // est dans l'URL, fiable), et chaque fiche expose `.jev_evdt_title`,
+    // `.jev_evdt_summary` (« Jour DD Mois YYYY, HH:MM - HH:MM »), `.jev_evdt_location`
+    // (« Lieu <adresse> ») et `.jev_evdt_desc`. JEvents éclate les événements
+    // multi-jours en une fiche par jour → chaque occurrence est un event daté.
+    // Ville par défaut Cossonay (agenda mono-commune, hameaux inclus).
+    url: 'https://www.cossonay.ch/agenda/',
+    baseUrl: 'https://www.cossonay.ch',
+    monthUrl: 'https://www.cossonay.ch/agenda/month.calendar',
+    kind: 'joomla-jevents-cossonay-communal-agenda'
   },
   valDeTravers: {
     // Val-de-Travers — agenda régional « vallon.info » (Neuchâtel, ~19-26 km d'Yverdon
@@ -3873,6 +3899,127 @@ async function scrapeMathod() {
   return uniqBy(events, e => e.url || e.id);
 }
 
+// --- Commune de Cossonay — agenda communal JEvents (Joomla) --------------------
+// JEvents n'expose pas d'API REST propre (export ICS en 403/500), mais rend tout
+// côté serveur. On énumère les occurrences depuis les pages month.calendar (la
+// DATE est dans l'URL de la fiche, donc fiable même sans parser le libellé FR),
+// puis on lit chaque fiche pour l'heure (`.jev_evdt_summary`), le lieu
+// (`.jev_evdt_location`) et la description (`.jev_evdt_desc`).
+const COSSONAY_WINDOW_DAYS = 120;
+const COSSONAY_MAX_DETAILS = 45;
+const COSSONAY_DETAIL_CONCURRENCY = 5;
+
+// Collect { url, startDate } occurrences from a month.calendar page. Both
+// icalrepeat.detail (recurring) and icalevent.detail (one-off) carry the
+// occurrence date as /YYYY/MM/DD/<id>/ in the href.
+function extractCossonayListings(html, baseUrl = SOURCES.cossonay.baseUrl) {
+  const $ = cheerio.load(html);
+  const out = [];
+  $('a[href*=".detail/"]').each((_, a) => {
+    const href = $(a).attr('href') || '';
+    const m = href.match(/ical(?:repeat|event)\.detail\/(\d{4})\/(\d{2})\/(\d{2})\/(\d+)\//);
+    if (!m) return;
+    out.push({ url: canonicalUrl(href, baseUrl) || href, startDate: `${m[1]}-${m[2]}-${m[3]}` });
+  });
+  return uniqBy(out, x => x.url);
+}
+
+// Parse the JEvents summary line ("Jour DD Mois YYYY, HH:MM - HH:MM") into the
+// first (start) and optional second (end) wall-clock times; all-day rows have no
+// HH:MM after the date.
+function cossonaySummaryTimes(summary) {
+  const times = [...clean(summary).matchAll(/\b(\d{1,2})[:h](\d{2})\b/g)].map(m => `${m[1].padStart(2, '0')}:${m[2]}`);
+  return { startTime: times[0] || null, endTime: times[1] || null };
+}
+
+function parseCossonayDetail(html, occ, opts = {}) {
+  const base = opts.baseUrl || SOURCES.cossonay.baseUrl;
+  const $ = cheerio.load(html);
+  const title = clean($('.jev_evdt_title').first().text())
+    || clean($('.jev_evdt_header').first().text());
+  if (!title || !occ || !occ.startDate) return null;
+  const summary = clean($('.jev_evdt_summary').first().text());
+  const { startTime } = cossonaySummaryTimes(summary);
+  // "Lieu <adresse>" — drop the "Lieu" label span text.
+  const locName = clean($('.jev_evdt_location').first().text()).replace(/^Lieu\s*/i, '');
+  const description = clean($('.jev_evdt_desc').first().text()).slice(0, 700);
+  const city = 'Cossonay';
+  const locationName = locName || city;
+  const locationText = uniqBy([locationName, city].filter(Boolean), x => x).join(', ');
+  const startDate = startTime ? isoDateZurich(occ.startDate, startTime) : occ.startDate;
+  const hay = `${title} ${description} ${locationName}`;
+  const ageText = /famille|enfants?|jeune public|tout public|intergén|d[èe]s \d/i.test(hay)
+    ? 'famille / tout public mentionné'
+    : '';
+  let priceText = '';
+  if (/gratuit|entr[ée]e libre|libre participation|au chapeau|prix libre|acc[èe]s libre/i.test(hay)) {
+    priceText = 'Gratuit / entrée libre (à confirmer)';
+  }
+  return normalizeEvent({
+    source: 'cossonay',
+    title,
+    startDate,
+    endDate: null,
+    locationName,
+    locationText,
+    city,
+    url: occ.url,
+    description,
+    ageText,
+    priceText,
+    tags: inferTags(`${hay} famille village terroir plein-air`),
+    officialSources: uniqBy([occ.url, SOURCES.cossonay.url].filter(Boolean), x => x),
+    sourceProvenance: 'Commune de Cossonay — agenda communal (Joomla / JEvents)',
+    evidence: clean([
+      title,
+      summary,
+      startDate && `début ${startDate}`,
+      locationName && `lieu ${locationName} (${city})`,
+      priceText && `prix ${priceText}`,
+      description
+    ].filter(Boolean).join(' | ')).slice(0, 1200)
+  });
+}
+
+async function scrapeCossonay() {
+  const today = new Date().toISOString().slice(0, 10);
+  const maxIso = new Date(Date.now() + COSSONAY_WINDOW_DAYS * 86400000).toISOString().slice(0, 10);
+  // Enumerate occurrences from the current month + the next three month grids.
+  const now = new Date();
+  const monthUrls = [];
+  for (let i = 0; i < 4; i++) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + i, 1));
+    const y = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    monthUrls.push(`${SOURCES.cossonay.monthUrl}/${y}/${mm}/01/-`);
+  }
+  let listings = [];
+  try {
+    const first = await fetchHtml(monthUrls[0], 20000);
+    listings = extractCossonayListings(first);
+  } catch (e) {
+    return [{ source: 'cossonay', title: 'Commune de Cossonay agenda', url: SOURCES.cossonay.url, error: e.message }];
+  }
+  for (const mu of monthUrls.slice(1)) {
+    try { listings.push(...extractCossonayListings(await fetchHtml(mu, 20000))); } catch { /* skip month */ }
+  }
+  const occs = uniqBy(listings, x => x.url)
+    .filter(o => o.startDate >= today && o.startDate <= maxIso)
+    .slice(0, COSSONAY_MAX_DETAILS);
+  const events = [];
+  for (let i = 0; i < occs.length; i += COSSONAY_DETAIL_CONCURRENCY) {
+    const batch = occs.slice(i, i + COSSONAY_DETAIL_CONCURRENCY);
+    const htmls = await Promise.all(batch.map(o =>
+      fetchHtml(o.url, 20000).then(h => [o, h]).catch(() => [o, null])));
+    for (const [o, html] of htmls) {
+      if (!html) continue;
+      const ev = parseCossonayDetail(html, o);
+      if (ev && ev.startDate) events.push(ev);
+    }
+  }
+  return uniqBy(events, e => e.url || e.id);
+}
+
 // --- Val-de-Travers — agenda régional « vallon.info » (WordPress / EventON) ----
 // La page /agenda/ liste chaque événement dans un box `.eventon_list_event` qui
 // embarque un schema.org Event JSON-LD (name / description / startDate / endDate /
@@ -6294,7 +6441,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -7323,6 +7470,44 @@ async function runFixtureTests() {
   const vfFar = vaudfamilleEventFromListing(vfRows.find(r => r.city === 'Lausanne'));
   assert(estimateDistanceKm(vfFar) > VAUDFAMILLE_MAX_KM, 'Lausanne exceeds the Vaudfamille regional radius and is dropped');
 
+  // Cossonay (Joomla / JEvents): listing enumerates occurrences with the date in
+  // the fiche URL; the detail page carries time (summary), location and text.
+  const cossListHtml = `<table><tr>
+    <td><a href="/agenda/icalrepeat.detail/2026/08/21/2148/-/cossgrill-2026">17:00 CossGrill 2026</a></td>
+    <td><a href="/agenda/icalrepeat.detail/2026/08/21/2148/-/cossgrill-2026">CossGrill dup</a></td>
+    <td><a href="/agenda/icalrepeat.detail/2026/08/01/2147/-/fete-du-1er-aout-a-allens">18:00 Fête du 1er août à Allens</a></td>
+    <td><a href="/menu/contact.html">Contact</a></td>
+  </tr></table>`;
+  const cossOccs = extractCossonayListings(cossListHtml, SOURCES.cossonay.baseUrl);
+  assert.strictEqual(cossOccs.length, 2, 'Cossonay listing dedupes occurrences by URL and ignores non-detail links');
+  const cossGrillOcc = cossOccs.find(o => /cossgrill/.test(o.url));
+  assert.strictEqual(cossGrillOcc.startDate, '2026-08-21', 'Cossonay occurrence date comes from the fiche URL');
+  assert.strictEqual(cossGrillOcc.url, 'https://www.cossonay.ch/agenda/icalrepeat.detail/2026/08/21/2148/-/cossgrill-2026', 'Cossonay builds an absolute fiche URL');
+  assert.deepStrictEqual(cossonaySummaryTimes('Vendredi 21 Août 2026, 17:00 - 22:00'), { startTime: '17:00', endTime: '22:00' }, 'Cossonay summary yields the start and end times');
+  assert.deepStrictEqual(cossonaySummaryTimes('Samedi 01 Août 2026'), { startTime: null, endTime: null }, 'Cossonay all-day summary yields no time');
+  const cossDetailHtml = `<div class="jev_eventdetails_body">
+    <div class="jev_evdt_header"><h2 class="jev_evdt_title">CossGrill 2026</h2></div>
+    <div class="jev_evdt_summary">Vendredi 21 Août 2026, 17:00 - 22:00</div>
+    <div class="jev_evdt_location"><span class="location">Lieu&nbsp;</span>Place du Temple</div>
+    <div class="jev_evdt_desc">Une rencontre estivale en Vieille-Ville de Cossonay autour d'une grillade party. Bar et grillades sur place, entrée libre.</div>
+  </div>`;
+  const cossGrill = parseCossonayDetail(cossDetailHtml, cossGrillOcc);
+  assert.strictEqual(cossGrill.source, 'cossonay');
+  assert.strictEqual(cossGrill.title, 'CossGrill 2026', 'Cossonay reads the fiche title');
+  assert.strictEqual(cossGrill.startDate, `2026-08-21T17:00:00${zurichOffsetForDate('2026-08-21')}`, 'Cossonay times the start from the summary at the URL date (DST-aware)');
+  assert.strictEqual(cossGrill.endDate, null, 'Cossonay keeps single-day occurrences (JEvents splits multi-day into one fiche per day)');
+  assert.strictEqual(cossGrill.locationName, 'Place du Temple', 'Cossonay strips the "Lieu" label from the location');
+  assert.strictEqual(cossGrill.city, 'Cossonay', 'Cossonay defaults the city to the commune');
+  assert.strictEqual(estimateDistanceKm(cossGrill), 24, 'Cossonay should resolve to 24 km from Yverdon');
+  assert(/gratuit/i.test(cossGrill.priceText), 'Cossonay picks up the free-entry cue from the description');
+  // All-day village fiche: no time in the summary → date-level start kept.
+  const cossAllens = parseCossonayDetail(
+    `<h2 class="jev_evdt_title">Fête du 1er août à Allens</h2><div class="jev_evdt_summary">Samedi 01 Août 2026</div><div class="jev_evdt_location"><span class="location">Lieu&nbsp;</span>Allens</div>`,
+    cossOccs.find(o => /allens/.test(o.url)));
+  assert.strictEqual(cossAllens.startDate, '2026-08-01', 'Cossonay all-day fiche keeps a date-level start');
+  assert.strictEqual(cossAllens.city, 'Cossonay', 'Cossonay hamlet (Allens) resolves via the commune city');
+  assert.strictEqual(estimateDistanceKm(cossAllens), 24, 'Cossonay hamlet resolves to the commune distance');
+
   const champventRows = extractChampventManifestationRows('<ul class="koCheckList"><li>1-3 mai 2026 | Rencontre des vieux tracteurs | Amicale des vieux tracteurs</li><li>31 décembre 2026 | Nouvel-An | Société de jeunesse</li></ul>', SOURCES.champvent.manifestationsUrl);
   assert.strictEqual(champventRows.length, 2);
   assert.strictEqual(champventRows[0].startDate, '2026-05-01');
@@ -7556,4 +7741,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseCossonayDetail, scrapeCossonay, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille };
