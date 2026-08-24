@@ -111,6 +111,9 @@ const LOCATION_KM_FROM_YVERDON = {
   // dominical familial à La Ramée (plage/rive du lac), à Marin-Epagnier.
   'marin-epagnier': 44,
   marin: 44,
+  // Laténium — Parc et musée d'archéologie, Espace Paul Vouga, à Hauterive (NE),
+  // sur la rive nord du lac de Neuchâtel entre Neuchâtel-ville et Marin-Epagnier.
+  hauterive: 37,
   fribourg: 55,
   // Jura & Trois-Lacs (J3L) — communes en scope du rayon Yverdon (rive sud du lac /
   // Broye / Val-de-Travers). Distances routières approx. depuis les coordonnées géo
@@ -536,6 +539,27 @@ const SOURCES = {
     url: 'https://ailleurs.ch/wp-json/wp/v2/activites?per_page=100&_fields=slug,link,title,content,type_activites',
     baseUrl: 'https://ailleurs.ch',
     kind: 'wordpress-rest-museum-family-activities-yverdon'
+  },
+  latenium: {
+    // Laténium — Parc et musée d'archéologie de Neuchâtel (Espace Paul Vouga, 2068
+    // Hauterive, sur la rive nord du lac de Neuchâtel, ~37 km d'Yverdon). Plus grand
+    // musée archéologique de Suisse + parc archéologique en plein air au bord du lac.
+    // Vraie programmation famille/plein-air à fort fit: « Dimanche malin » (tous les
+    // dimanches, activité créative pour familles, gratuite pour les enfants), « Sous le
+    // toit du passé » (visites guidées gratuites mensuelles), visites d'expo, ateliers,
+    // spectacles, concerts et grands week-ends gratuits (25 ans, concours de cabanes,
+    // food trucks dans le parc) → culture / patrimoine / lac / famille. DISTINCT de
+    // `museeYverdon`/`maisonAilleurs` (musées d'Yverdon) et de `neuchatelVille` (agenda
+    // Ville de Neuchâtel / Culturoscope, URLs différentes → dédup URL en aval sans
+    // collision). Plateforme WordPress + Polylang: le custom post type `event` est exposé
+    // en clair via l'API REST `/wp-json/wp/v2/event`, avec un champ top-level `start_date`
+    // (`YYYY-MM-DD`, fait foi pour la date) et le corps `content.rendered` qui porte la
+    // phrase date+horaire FR (« Dimanche 13 décembre de 14h à 16h30 », « à 11h45 ») + le
+    // prix (« visite gratuite », « entrée au musée payante »). `lang=fr` filtre proprement
+    // les doublons Polylang (it/en/de) → une seule requête, pas d'enrichissement détail.
+    url: 'https://latenium.ch/wp-json/wp/v2/event?per_page=100&lang=fr&_fields=id,slug,link,title,content,excerpt,start_date',
+    baseUrl: 'https://latenium.ch',
+    kind: 'wordpress-rest-archaeology-museum-family-agenda-neuchatel'
   },
   museeYverdon: {
     // Musée d'Yverdon et région (MY) — musée d'histoire/archéologie régionale logé dans
@@ -5886,6 +5910,110 @@ async function scrapeMaisonAilleurs() {
   return uniqBy(events, e => recommendationKey(e));
 }
 
+// --- Laténium — Parc et musée d'archéologie (Hauterive/Neuchâtel) --------------
+// WordPress + Polylang. The `event` custom post type is public via the WP REST API
+// (`/wp-json/wp/v2/event`). Each record carries a top-level `start_date` (YYYY-MM-DD,
+// authoritative for the day) and `content.rendered` whose lead sentence holds the FR
+// date + horaire (« Dimanche 13 décembre de 14h à 16h30 », « à 11h45 ») and price cue.
+// `lang=fr` drops the it/en/de Polylang duplicates so one request returns the whole
+// upcoming French agenda; no detail fetch is needed.
+function fetchLateniumData(url, maxTime = 25) {
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 24 * 1024 * 1024 });
+}
+
+// Reduce content.rendered to the human lead and strip the leading « Home » Laténium »
+// breadcrumb + the repeated title, so what remains begins with the date/horaire sentence.
+function lateniumLead(contentHtml, title = '') {
+  let text = htmlToText(contentHtml || '');
+  text = text.replace(/^\s*Home\s*[»>]\s*Laténium\s*/i, '');
+  const t = clean(title);
+  if (t && text.slice(0, t.length + 4).includes(t)) {
+    text = text.slice(text.indexOf(t) + t.length);
+  }
+  return clean(text);
+}
+
+// The date sentence sits right after the title; the descriptive prose (which is full of
+// sub-activity times on multi-activity week-ends) follows without a period. Bound the
+// time lookup to the first ~80 chars so we read the event's own start time and correctly
+// return no time for range days like « Samedi 12 et dimanche 13 septembre » (a date-level
+// week-end whose first "de HHh" belongs to a sub-activity deep in the programme).
+function lateniumTime(lead) {
+  const head = clean(lead).slice(0, 80);
+  const t = parseTime(head);
+  return t ? t.slice(0, 5) : '';
+}
+
+function lateniumPrice(lead) {
+  const l = clean(lead);
+  const chf = l.match(/CHF\s*\d+[.\-\d]*/i) || l.match(/\d+[.\-]\s*CHF/i);
+  if (chf) return clean(chf[0]);
+  const freeVisit = /(?:visite|activit[ée]s?|entr[ée]e\s+et\s+(?:la\s+)?visite)[^.]{0,40}gratuit|gratuit[^.]{0,40}(?:visite|activit)/i.test(l);
+  const paidMuseum = /entr[ée]e\s+(?:au\s+mus[ée]e\s+)?(?:est\s+)?payante|mus[ée]e\s+est\s+payante/i.test(l);
+  if (/entr[ée]e\s+libre|entr[ée]e\s+et\s+(?:la\s+)?visite\s+sont\s+gratuites|entr[ée]e\s+gratuite/i.test(l) && !paidMuseum) return 'Gratuit';
+  if (freeVisit && paidMuseum) return 'Activité gratuite (entrée du musée payante)';
+  if (/gratuit/i.test(l) && paidMuseum) return 'Activité gratuite (entrée du musée payante)';
+  if (/gratuit/i.test(l)) return 'Gratuit';
+  return '';
+}
+
+function lateniumAgeText(lead) {
+  const l = clean(lead);
+  const m = l.match(/d[èe]s\s+\d{1,2}\s*ans/i)
+    || l.match(/\d{1,2}\s*(?:-|à)\s*\d{1,2}\s*ans/i)
+    || l.match(/jusqu['’]à\s+\d{1,2}\s*ans/i)
+    || l.match(/tout\s+public/i);
+  return m ? clean(m[0]) : '';
+}
+
+function lateniumEventFromRecord(rec) {
+  const title = clean(htmlToText(rec.title && rec.title.rendered || ''));
+  const startDay = clean(rec.start_date || '').slice(0, 10);
+  const link = clean(rec.link || '');
+  if (!title || !/^20\d{2}-\d{2}-\d{2}$/.test(startDay)) return null;
+  const lead = lateniumLead(rec.content && rec.content.rendered || '', title);
+  const excerpt = clean(htmlToText(rec.excerpt && rec.excerpt.rendered || ''));
+  const time = lateniumTime(lead);
+  const priceText = lateniumPrice(lead);
+  const ageText = lateniumAgeText(lead);
+  const isFamily = /dimanche\s+malin|enfants?|famille|petit-?e?s?\s+et\s+grand|concours\s+de\s+cabanes|atelier/i.test(lead) || /dimanche\s+malin/i.test(title);
+  const startDate = isoDateZurich(startDay, time);
+  const description = clean(lead.slice(0, 480)) || excerpt ||
+    'Activité au Laténium (Parc et musée d’archéologie, Hauterive/Neuchâtel).';
+  return normalizeEvent({
+    source: 'latenium',
+    title: `${title} (Laténium)`,
+    startDate,
+    endDate: null,
+    locationName: 'Laténium',
+    locationText: 'Laténium — Parc et musée d’archéologie, Espace Paul Vouga, Hauterive (NE)',
+    city: 'Hauterive',
+    url: link || SOURCES.latenium.baseUrl,
+    description,
+    ageText: ageText || (isFamily ? 'famille / enfants' : ''),
+    priceText,
+    tags: inferTags(`${isFamily ? 'famille enfants atelier ' : ''}musée archéologie découverte culture patrimoine lac plein-air parc ${title} ${lead}`),
+    sourceProvenance: `Laténium — agenda: ${link}`,
+    officialSources: [link, `${SOURCES.latenium.baseUrl}/agenda/`].filter(Boolean),
+    evidence: clean(`${title} | start:${startDay}${time ? ` ${time}` : ''} | ${ageText || (isFamily ? 'famille' : 'tout public')} | ${priceText || 'prix n/c'}`).slice(0, 1200)
+  });
+}
+
+async function scrapeLatenium() {
+  let records = [];
+  try {
+    records = JSON.parse(fetchLateniumData(SOURCES.latenium.url));
+  } catch (e) {
+    return [{ source: 'latenium', title: 'Laténium — agenda', url: SOURCES.latenium.baseUrl, error: e.message }];
+  }
+  if (!Array.isArray(records)) return [];
+  const today = new Date().toISOString().slice(0, 10);
+  const events = records
+    .map(lateniumEventFromRecord)
+    .filter(e => e && e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today);
+  return uniqBy(events, e => recommendationKey(e));
+}
+
 // --- Jura & Trois-Lacs (J3L) — agenda régional géo-restreint -------------------
 // MyCity Tourism agenda: the page embeds a GeoJSON FeatureCollection in a
 // `<script id="list-data" type="application/json">` blob (~1600 events). Each
@@ -6516,7 +6644,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -7171,6 +7299,29 @@ async function runFixtureTests() {
   assert.ok(mdaEvent.tags.includes('science') || mdaEvent.tags.includes('culture'), 'Maison d’Ailleurs should carry a science/culture tag');
   const mdaEvergreen = maisonAilleursEventFromRecord({ slug: 'crea-lab-ete-2026', link: 'https://ailleurs.ch/activites/crea-lab-ete-2026/', title: { rendered: 'Le Crea-lab' }, content: { rendered: '<p>ATELIER KIDS Tous les dimanches des vacances d’été Enfants dès 6 ans</p>' } });
   assert.strictEqual(mdaEvergreen, null, 'Maison d’Ailleurs evergreen/recurring activity without a concrete date is skipped');
+  // Laténium (WP REST `event`): the top-level start_date is authoritative; the content
+  // lead holds the FR date+horaire sentence right after the « Home » Laténium <title> »
+  // breadcrumb. Time is bound to the lead's first ~80 chars so multi-activity week-ends
+  // (whose first "de HHh" belongs to a sub-activity) stay date-level. Price cues resolve
+  // « visite/activité gratuite mais entrée musée payante » vs a plain free/CHF listing.
+  const latDimanche = { rendered: 'Home &raquo; Laténium Dimanche malin Dimanche 13 décembre de 14h à 16h30 L’équipe de médiation vous invite. L’entrée au musée est payante (gratuite pour les enfants jusqu’à 16 ans). Les activités sont gratuites.' };
+  assert.strictEqual(lateniumLead(latDimanche.rendered, 'Dimanche malin').slice(0, 22), 'Dimanche 13 décembre d', 'Laténium lead strips breadcrumb + title, keeps the date sentence');
+  assert.strictEqual(lateniumTime(lateniumLead(latDimanche.rendered, 'Dimanche malin')), '14:00', 'Laténium reads the event start time from the lead');
+  assert.strictEqual(lateniumPrice(lateniumLead(latDimanche.rendered, 'Dimanche malin')), 'Activité gratuite (entrée du musée payante)', 'Laténium free activity but paid museum entry');
+  const latEvent = lateniumEventFromRecord({ id: 1, slug: 'dimanche-malin-13-decembre-2026', link: 'https://latenium.ch/event/dimanche-malin-13-decembre-2026/', title: { rendered: 'Dimanche malin &#8211; 13 décembre 2026' }, start_date: '2026-12-13', content: latDimanche, excerpt: { rendered: '' } });
+  assert.strictEqual(latEvent.source, 'latenium', 'Laténium event source tag');
+  assert.strictEqual(latEvent.startDate, '2026-12-13T14:00:00+01:00', 'Laténium winter start is DST-aware (+01:00) with the lead time');
+  assert.strictEqual(latEvent.endDate, null, 'Laténium single record has no end date');
+  assert.strictEqual(latEvent.city, 'Hauterive', 'Laténium city is Hauterive');
+  assert.strictEqual(estimateDistanceKm(latEvent), 37, 'Laténium resolves to Hauterive 37 km');
+  assert.strictEqual(latEvent.url, 'https://latenium.ch/event/dimanche-malin-13-decembre-2026/', 'Laténium keeps the stable /event/<slug>/ URL');
+  // Week-end range day: the first "de HHh" is a sub-activity deep in the programme, so the
+  // event stays date-level (no spurious time) and the free-visit price is captured.
+  const latWeekend = { rendered: 'Home &raquo; Laténium Futurs désirables Samedi 12 et dimanche 13 septembre Au programme du week-end : ateliers. Sous le toit du passé De 11h à 11h30 Visites flash. La visite est gratuite mais l’entrée au musée est payante.' };
+  assert.strictEqual(lateniumTime(lateniumLead(latWeekend.rendered, 'Futurs désirables')), '', 'Laténium leaves range-day week-ends date-level (no sub-activity time leak)');
+  const latWeekendEv = lateniumEventFromRecord({ id: 2, slug: 'futurs-desirables-12-septembre-2026', link: 'https://latenium.ch/event/futurs-desirables-12-septembre-2026/', title: { rendered: 'Futurs désirables' }, start_date: '2026-09-12', content: latWeekend, excerpt: { rendered: '' } });
+  assert.strictEqual(latWeekendEv.startDate, '2026-09-12', 'Laténium range-day week-end is a date-level start (summer, no time)');
+  assert.strictEqual(lateniumEventFromRecord({ id: 3, slug: 'x', link: 'https://latenium.ch/event/x/', title: { rendered: 'X' }, start_date: '', content: { rendered: '' } }), null, 'Laténium record without a start_date is skipped');
   // Musée d'Yverdon et région (WordPress `.event-card` agenda): the card-date label
   // carries the FR date (no year on single days) + wall-clock times; the detail page
   // enriches Lieu/Prix. A fixed "now" pins the forward-year inference deterministically.
@@ -7847,4 +7998,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille };
