@@ -3297,7 +3297,8 @@ function practicalCaveat(caveats = []) {
 //  - a per-source cap so one venue can't monopolise the shortlist,
 //  - an evergreen-vs-dated distinction that caps permanent exhibits so dated
 //    events surface, while keeping the best evergreen ones eligible.
-const SHORTLIST_SIZE = 5;
+const DIGEST_SIZE = 10;               // TASK-231: top 10 (was 5) so Johan can spot ranking errors
+const SHORTLIST_SIZE = DIGEST_SIZE;   // kept for callers; digest size is the default
 const SHORTLIST_MAX_EVERGREEN = 1;   // at most this many permanent exhibits in the top-N
 const EVERGREEN_MIN_SPAN_DAYS = 8;   // spans more than a week → treated as ongoing/permanent
 
@@ -3314,14 +3315,174 @@ function isEvergreenEvent(e, window) {
   return startsBeforeWindow && runsPastWindow && spanDays >= EVERGREEN_MIN_SPAN_DAYS;
 }
 
-function shortlistedRecommendations(scored, window) {
-  const candidates = scored.filter(x => x.score.total >= 60);
-  // Deterministic order: recommandé label first, then score desc, then a stable
-  // tiebreak on source + event id so the same pool always yields the same list.
+// --- Taste curation, anti-repetition & feedback loop (TASK-231) ----------------
+// The deterministic scorer filters (age/date/distance) but can't judge real family
+// appeal. This layer encodes Johan's explicit taste feedback (TASTE-FEEDBACK.md):
+// novelty/one-off > evergreen, deprioritise art / generic walks, near-exclude
+// civic-administrative, bonus festivals/terroir/nature-science. It also persists a
+// memory of already-shown events (anti-repetition) and a machine-readable feedback
+// file that the next run reads back. All of it is deterministic and side-effect-free
+// on scoring correctness — the LLM re-rank (automation/rerank_llm.js) is a separate,
+// fallback-safe layer on top.
+const TASTE_CONFIG = {
+  artMalus: -18,          // art without a clear child/family angle
+  genericWalkMalus: -12,  // "balade / visite guidée / découverte de <ville>" sans accroche
+  civicMalus: -45,        // conseils, votations, administratif → effectively excluded
+  evergreenMalus: -12,    // permanent/recurring exhibit
+  noveltyBonus: 8,        // dated one-off happening in the target window
+  positiveBonus: 8,       // festivals, fêtes, terroir, plein-air, nature/animaux/science
+  repeatWindowDays: 56    // don't re-propose something shown within this many days
+};
+
+const STATE_DIR = path.join(__dirname, 'automation', 'state');
+const SHOWN_STATE_FILE = path.join(STATE_DIR, 'shown-events.json');
+const TASTE_FEEDBACK_FILE = path.join(STATE_DIR, 'taste-feedback.json');
+
+// Stable per-event signature (source + first words of a normalized title) used for
+// anti-repetition and feedback matching — robust to id churn across scraper runs.
+function eventSignature(e) {
+  const src = String((e && e.source) || 'unknown').toLowerCase();
+  const title = String((e && e.title) || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+    .split(/\s+/).filter(Boolean).slice(0, 6).join(' ');
+  return `${src}::${title}`;
+}
+
+function normForMatch(s) {
+  return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+}
+
+// Taste signals derived from title/description/tags. Pure function → easy to test.
+function tasteSignals(e, window) {
+  const hay = normForMatch(`${e.title || ''} ${e.description || ''} ${e.locationText || ''} ${e.city || ''}`);
+  const tags = new Set(e.tags || []);
+  const childCentric = hasChildCentricSignal(e);
+  let delta = 0;
+  const flags = [];
+  const reasons = [];
+
+  if (/conseil (communal|general|municipal|de ville)|votation|assemblee (communale|generale|bourgeoisiale|de commune)|seance du conseil|\belections?\b|scrutin|budget communal|preavis municipal|legislatif communal/.test(hay)) {
+    delta += TASTE_CONFIG.civicMalus; flags.push('civic'); reasons.push('civique/administratif');
+  }
+  if (!childCentric && /vernissage|exposition d[ '’]?art|expo d[ '’]?art|galerie d[ '’]?art|\bpeinture\b|\bsculpture\b|arts? plastiques|aquarelle|art contemporain|finissage/.test(hay)) {
+    delta += TASTE_CONFIG.artMalus; flags.push('art'); reasons.push('art (peu apprécié)');
+  }
+  const strongHook = /festival|f[êe]te|fete|atelier|marche|terroir|spectacle|concert|nocturne/.test(hay)
+    || tags.has('animals') || tags.has('science');
+  if (!strongHook && /\bbalade|\bbalades|\bpromenade|visite guidee|decouverte de\s+\p{L}|circuit pedestre|randonnee guidee|visite du village/u.test(hay)) {
+    delta += TASTE_CONFIG.genericWalkMalus; flags.push('generic-walk'); reasons.push('balade/visite générique');
+  }
+  if (isEvergreenEvent(e, window)) {
+    delta += TASTE_CONFIG.evergreenMalus; flags.push('evergreen'); reasons.push('expo permanente/récurrente');
+  } else if (e.startDate && window && String(e.startDate).slice(0, 10) >= window.start) {
+    delta += TASTE_CONFIG.noveltyBonus; flags.push('dated'); reasons.push('événement daté/ponctuel');
+  }
+  if (/festival|f[êe]te|fete (de|du|des|au|villageoise)|kermesse|benichon|terroir|marche (artisanal|de noel|du terroir|paysan)|open ?air|plein air/.test(hay)
+      || tags.has('animals') || tags.has('science') || tags.has('nature') || tags.has('water')) {
+    delta += TASTE_CONFIG.positiveBonus; flags.push('taste-fit'); reasons.push('festival/terroir/nature-science');
+  }
+  return { delta, flags, reasons };
+}
+
+function loadShownState(file = SHOWN_STATE_FILE) {
+  try { const j = JSON.parse(fs.readFileSync(file, 'utf8')); return j && typeof j === 'object' ? { shown: j.shown || {} } : { shown: {} }; }
+  catch { return { shown: {} }; }
+}
+
+// Signatures shown within `days` (default: the anti-repetition window). These are
+// hard-excluded from the next shortlist so nothing is re-proposed week after week.
+function shownSignaturesWithin(state, days = TASTE_CONFIG.repeatWindowDays, now = Date.now()) {
+  const set = new Set();
+  const cutoff = now - days * 86400000;
+  for (const [sig, rec] of Object.entries((state && state.shown) || {})) {
+    const t = Date.parse((rec && (rec.lastShownAt || rec.firstShownAt)) || 0);
+    if (Number.isFinite(t) && t >= cutoff) set.add(sig);
+  }
+  return set;
+}
+
+// Records the events that made it into a sent digest so future runs don't repeat
+// them. Called by automation/record_shown.js after a successful Telegram send.
+function recordShownEvents(events, opts = {}) {
+  const file = opts.file || SHOWN_STATE_FILE;
+  const now = opts.now ? new Date(opts.now).toISOString() : new Date().toISOString();
+  const state = loadShownState(file);
+  for (const e of events || []) {
+    const sig = eventSignature(e);
+    const prev = state.shown[sig];
+    state.shown[sig] = {
+      title: e.title || (prev && prev.title) || '',
+      source: e.source || (prev && prev.source) || '',
+      firstShownAt: prev ? prev.firstShownAt : now,
+      lastShownAt: now,
+      count: (prev ? prev.count || 0 : 0) + 1
+    };
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(state, null, 2) + '\n');
+  return state;
+}
+
+function loadTasteFeedback(file = TASTE_FEEDBACK_FILE) {
+  try { const j = JSON.parse(fs.readFileSync(file, 'utf8')); return { rules: Array.isArray(j.rules) ? j.rules : [] }; }
+  catch { return { rules: [] }; }
+}
+
+// Applies persisted feedback rules: a substring match on title/tags/source shifts
+// the score by the rule's delta. This is how a 👍/👎 from Johan changes next run.
+function feedbackAdjustment(e, feedback) {
+  if (!feedback || !Array.isArray(feedback.rules) || !feedback.rules.length) return { delta: 0, reasons: [] };
+  const hay = normForMatch(`${e.title || ''} ${e.description || ''} ${(e.tags || []).join(' ')} ${e.source || ''} ${e.city || ''}`);
+  let delta = 0; const reasons = [];
+  for (const r of feedback.rules) {
+    const m = normForMatch(r && r.match).trim();
+    const d = Number(r && r.delta) || 0;
+    if (m && d && hay.includes(m)) { delta += d; reasons.push(`retour Johan: «${r.match}» (${d > 0 ? '+' : ''}${d})`); }
+  }
+  return { delta, reasons };
+}
+
+// Adjusts each scored item's total by taste signals + persisted feedback, records a
+// transparent `score.taste` breakdown, and re-derives the label from the new total.
+// Mutates in place; safe to call once per run before shortlisting/ranking.
+function applyTasteCuration(scored, window, opts = {}) {
+  const feedback = opts.feedback || loadTasteFeedback();
+  for (const item of scored) {
+    const base = item.score.baseTotal != null ? item.score.baseTotal : item.score.total;
+    item.score.baseTotal = base;
+    const t = tasteSignals(item.event, window);
+    const f = feedbackAdjustment(item.event, feedback);
+    const total = Math.max(0, Math.min(100, base + t.delta + f.delta));
+    item.score.total = total;
+    item.score.taste = { delta: t.delta + f.delta, flags: t.flags, reasons: [...t.reasons, ...f.reasons] };
+    item.score.label = total >= 70 && hasChildCentricSignal(item.event) ? 'recommandé' : 'option secondaire';
+  }
+  return scored;
+}
+
+// Selects the digest shortlist. Enforces per-source diversity, an evergreen cap and
+// anti-repetition (opts.excludeSignatures), and honours an LLM re-rank when present
+// (score.llm.rank); otherwise falls back to the deterministic recommandé/score order.
+function shortlistedRecommendations(scored, window, opts = {}) {
+  const size = opts.size || DIGEST_SIZE;
+  const exclude = opts.excludeSignatures instanceof Set
+    ? opts.excludeSignatures
+    : new Set(opts.excludeSignatures || []);
+  const candidates = scored.filter(x => x.score.total >= 60 && !exclude.has(eventSignature(x.event)));
+  const hasLlm = candidates.some(x => x.score.llm && Number.isFinite(x.score.llm.rank));
+  // Deterministic order: LLM rank first when available, else recommandé label; then
+  // score desc, then a stable tiebreak on source + event id.
   const ordered = candidates.slice().sort((a, b) => {
-    const la = a.score.label === 'recommandé' ? 0 : 1;
-    const lb = b.score.label === 'recommandé' ? 0 : 1;
-    if (la !== lb) return la - lb;
+    if (hasLlm) {
+      const ra = a.score.llm && Number.isFinite(a.score.llm.rank) ? a.score.llm.rank : Infinity;
+      const rb = b.score.llm && Number.isFinite(b.score.llm.rank) ? b.score.llm.rank : Infinity;
+      if (ra !== rb) return ra - rb;
+    } else {
+      const la = a.score.label === 'recommandé' ? 0 : 1;
+      const lb = b.score.label === 'recommandé' ? 0 : 1;
+      if (la !== lb) return la - lb;
+    }
     if (b.score.total !== a.score.total) return b.score.total - a.score.total;
     const sa = a.event.source || '', sb = b.event.source || '';
     if (sa !== sb) return sa < sb ? -1 : 1;
@@ -3342,7 +3503,7 @@ function shortlistedRecommendations(scored, window) {
   ];
   for (const { perSourceCap, capEvergreen } of passes) {
     for (const c of ordered) {
-      if (picked.length >= SHORTLIST_SIZE) break;
+      if (picked.length >= size) break;
       if (picked.includes(c)) continue;
       const src = c.event.source || 'unknown';
       if ((sourceCount.get(src) || 0) >= perSourceCap) continue;
@@ -3352,31 +3513,34 @@ function shortlistedRecommendations(scored, window) {
       sourceCount.set(src, (sourceCount.get(src) || 0) + 1);
       if (evergreen) evergreenCount++;
     }
-    if (picked.length >= SHORTLIST_SIZE) break;
+    if (picked.length >= size) break;
   }
-  return picked.slice(0, SHORTLIST_SIZE);
+  return picked.slice(0, size);
 }
 
-function telegramSummary(scored, window) {
-  const top = shortlistedRecommendations(scored, window);
+function telegramSummary(scored, window, opts = {}) {
+  const top = shortlistedRecommendations(scored, window, opts);
   if (!top.length) return `Idées famille pour ce week-end — ${frWindow(window)}\n\nAucune recommandation fiable: les sources ont été collectées, mais rien ne passe les filtres date/lieu/qualité.`;
   const lines = [
     `BROUILLON NON VALIDÉ — reviews dédiées par événement requises avant envoi`,
-    `Idées famille pour ce week-end — ${frWindow(window)}`,
+    `Idées famille pour ce week-end — ${frWindow(window)} (top ${top.length})`,
     `Sélection sourcée autour d’Yverdon, à vérifier avant de partir.`
   ];
-  return lines.concat(top.map(({event:e, score}, i) =>
-    `${i+1}. ${e.title}\n` +
-    `📅 ${frDate(e.startDate)}\n` +
-    `📍 ${e.locationText || e.city}\n` +
-    `Pourquoi: ${(score.reasons && score.reasons.length) ? score.reasons.join(' · ') : fitReason(e)}. Score ${score.total}/100 — ${score.label}.\n` +
-    `À vérifier: ${practicalCaveat(score.caveats && score.caveats.length ? score.caveats : [caveat(e)])}\n` +
-    `${e.url}`
-  )).join('\n\n');
+  return lines.concat(top.map(({event:e, score}, i) => {
+    const why = (score.llm && score.llm.why) ? score.llm.why
+      : ((score.reasons && score.reasons.length) ? score.reasons.join(' · ') : fitReason(e));
+    const tasteFlags = (score.taste && score.taste.flags && score.taste.flags.length) ? ` [${score.taste.flags.join(',')}]` : '';
+    return `${i+1}. ${e.title}\n` +
+      `📅 ${frDate(e.startDate)}\n` +
+      `📍 ${e.locationText || e.city}\n` +
+      `Pourquoi: ${why}. Score ${score.total}/100 — ${score.label}${tasteFlags}.\n` +
+      `À vérifier: ${practicalCaveat(score.caveats && score.caveats.length ? score.caveats : [caveat(e)])}\n` +
+      `${e.url}`;
+  })).join('\n\n');
 }
 
-function eventReviewQueue(scored, window) {
-  const top = shortlistedRecommendations(scored, window);
+function eventReviewQueue(scored, window, opts = {}) {
+  const top = shortlistedRecommendations(scored, window, opts);
   return {
     status: top.length ? 'reviews_required_before_send' : 'no_recommendations',
     instruction: 'Open one isolated subagent/session per shortlisted event. Each must open/read the canonical event page, verify practical facts, challenge ranking, and write event-reviews/<event-id>.md before any final Telegram summary is sent.',
@@ -3390,9 +3554,13 @@ function eventReviewQueue(scored, window) {
       location: event.locationText || event.city || event.locationName,
       source: event.source,
       score: score.total,
+      baseScore: score.baseTotal != null ? score.baseTotal : score.total,
       label: score.label,
       reasons: score.reasons || [],
-      caveats: score.caveats || []
+      caveats: score.caveats || [],
+      taste: score.taste || null,
+      why: (score.llm && score.llm.why) ? score.llm.why : '',
+      llmRank: (score.llm && Number.isFinite(score.llm.rank)) ? score.llm.rank : null
     }))
   };
 }
@@ -7904,7 +8072,7 @@ async function runFixtureTests() {
     ];
     // Shuffle to prove the selection sorts deterministically regardless of input order.
     const shuffled = [pool[5], pool[0], pool[8], pool[3], pool[6], pool[1], pool[7], pool[4], pool[2]];
-    const top = shortlistedRecommendations(shuffled, win);
+    const top = shortlistedRecommendations(shuffled, win, { size: 5 });
 
     assert.strictEqual(top.length, 5, `shortlist should fill to 5, got ${top.length}`);
     const sources = top.map(t => t.event.source);
@@ -7917,14 +8085,93 @@ async function runFixtureTests() {
     const cpCount = sources.filter(s => s === 'champPittet').length;
     assert(cpCount <= 1, `Champ-Pittet must not monopolise the shortlist, got ${cpCount} entries`);
     // Determinism: same pool → identical ids in identical order.
-    const again = shortlistedRecommendations(pool, win).map(t => t.event.id);
+    const again = shortlistedRecommendations(pool, win, { size: 5 }).map(t => t.event.id);
     assert.deepStrictEqual(top.map(t => t.event.id), again, 'selection must be deterministic across input orderings');
 
     // Thin pool: only same-source evergreen exhibits still return all of them
     // (escalation) rather than dropping below the old slice() count.
     const thin = [evergreen('champPittet', 'a', 96), evergreen('champPittet', 'b', 95), evergreen('champPittet', 'c', 94)];
-    assert.strictEqual(shortlistedRecommendations(thin, win).length, 3, 'thin same-source pool should still fill from what exists');
+    assert.strictEqual(shortlistedRecommendations(thin, win, { size: 5 }).length, 3, 'thin same-source pool should still fill from what exists');
     console.log(`[TEST] digest selection (TASK-230): 5 distinct sources, ${evergreenPicked} evergreen, dated gems surfaced, deterministic`);
+  }
+
+  // --- TASK-231: taste curation, top-10, anti-repetition, feedback, LLM re-rank ---
+  {
+    const win = { start: '2026-08-22', endExclusive: '2026-08-24' };
+    // Raw event objects (not normalizeEvent, which regenerates the id) so tests can
+    // address candidates by a stable id handle.
+    const mk = (source, id, title, extra = {}) => ({
+      event: { source, id, title, description: '', tags: [], url: `https://x.invalid/${id}`, startDate: '2026-08-23', endDate: null, ...extra },
+      score: { total: 80, baseTotal: 80, label: 'recommandé', reasons: [], caveats: [] }
+    });
+
+    // Taste signals: civic near-excluded, art demoted, generic walk demoted,
+    // festival/terroir boosted, evergreen penalised, dated one-off bonused.
+    const civic = tasteSignals(normalizeEvent({ source: 's', title: 'Conseil communal — séance publique', startDate: '2026-08-23' }), win);
+    assert(civic.flags.includes('civic') && civic.delta <= -30, `civic should be near-excluded, got ${civic.delta}`);
+    const art = tasteSignals(normalizeEvent({ source: 's', title: 'Vernissage — exposition de peinture et sculpture', startDate: '2026-08-23' }), win);
+    assert(art.flags.includes('art'), 'art event should carry the art flag');
+    const walk = tasteSignals(normalizeEvent({ source: 's', title: 'Balades découverte de Môtiers', startDate: '2026-08-23' }), win);
+    assert(walk.flags.includes('generic-walk'), 'generic walk should carry the generic-walk flag');
+    const festival = tasteSignals(normalizeEvent({ source: 's', title: 'Fête de la préhistoire — atelier enfants', startDate: '2026-08-23' }), win);
+    assert(festival.delta > 0, `festival/terroir should be bonused, got ${festival.delta}`);
+    const evergreenSig = tasteSignals(normalizeEvent({ source: 's', title: 'Expo abeilles', startDate: '2026-03-28', endDate: '2026-12-31' }), win);
+    assert(evergreenSig.flags.includes('evergreen'), 'permanent exhibit should carry the evergreen flag');
+
+    // applyTasteCuration mutates totals and downgrades civic below the 60 gate.
+    const scored = [
+      mk('a', 'civic1', 'Conseil communal — votation'),
+      mk('b', 'fest1', 'Fête du terroir — atelier enfants'),
+      mk('c', 'art1', "Vernissage exposition d'art")
+    ];
+    applyTasteCuration(scored, win, { feedback: { rules: [] } });
+    const civicItem = scored.find(s => s.event.id === 'civic1');
+    assert(civicItem.score.total < 60, `civic total should drop below the shortlist gate, got ${civicItem.score.total}`);
+    assert(scored.find(s => s.event.id === 'fest1').score.total >= 80, 'festival should be boosted at/above base');
+
+    // Feedback loop: a persisted rule shifts the score on the next run.
+    const fb = { rules: [{ match: 'abeilles', delta: -25 }] };
+    const adj = feedbackAdjustment(normalizeEvent({ source: 's', title: 'Expo abeilles Pro Natura' }), fb);
+    assert.strictEqual(adj.delta, -25, `feedback rule should apply -25, got ${adj.delta}`);
+
+    // Anti-repetition: an event whose signature was shown recently is excluded.
+    const e1 = { source: 'grandson', id: 'g1', title: 'Escape Game au château', startDate: '2026-08-23', url: 'https://x/g1' };
+    const n1 = { source: 'newsrc', id: 'n1', title: 'Nouveau festival de village', startDate: '2026-08-23', url: 'https://x/n1' };
+    const state = recordShownEvents([e1], { file: '/tmp/ka-shown-test.json', now: Date.now() });
+    const excl = shownSignaturesWithin(state, 56, Date.now());
+    assert(excl.has(eventSignature(e1)), 'recorded event signature should be in the recent-shown set');
+    const poolRep = [
+      { event: e1, score: { total: 95, label: 'recommandé', reasons: [], caveats: [] } },
+      { event: n1, score: { total: 80, label: 'recommandé', reasons: [], caveats: [] } }
+    ];
+    const repTop = shortlistedRecommendations(poolRep, win, { size: 10, excludeSignatures: excl });
+    assert(!repTop.some(t => t.event === e1), 'already-shown event must not be re-proposed');
+    assert(repTop.some(t => t.event === n1), 'a fresh event should still be shortlisted');
+    require('fs').unlinkSync('/tmp/ka-shown-test.json');
+
+    // Top-10 sizing + LLM re-rank ordering (injected, no network).
+    const big = [];
+    for (let i = 0; i < 14; i++) big.push(mk(`src${i}`, `id${i}`, `Festival ${i}`));
+    const { rerankShortlist } = require('./automation/rerank_llm.js');
+    const fakeModel = async () => JSON.stringify({
+      model: 'test/model',
+      outputs: [{ text: '[{"id":"id13","keep":true,"why":"le plus fun"},{"id":"id7","keep":true,"why":"pile dans nos goûts"}]' }]
+    });
+    const rr = await rerankShortlist(big, win, { runModel: fakeModel });
+    assert(rr && rr.ranking.length === 2, 'LLM re-rank should parse the injected ranking');
+    const byId = new Map(big.map(x => [x.event.id, x]));
+    rr.ranking.forEach((r, idx) => { byId.get(r.id).score.llm = { rank: idx + 1, why: r.why }; });
+    const top10 = shortlistedRecommendations(big, win, { size: 10 });
+    assert.strictEqual(top10.length, 10, `digest should be a top-10, got ${top10.length}`);
+    assert.strictEqual(top10[0].event.id, 'id13', 'LLM top pick should lead the shortlist');
+    assert.strictEqual(top10[1].event.id, 'id7', 'LLM second pick should be second');
+
+    // LLM fallback: a throwing/garbage model resolves to null → deterministic order.
+    const bad = await rerankShortlist(big, win, { runModel: async () => 'not json at all' });
+    assert.strictEqual(bad, null, 'unparseable model output must fall back to null (deterministic)');
+    const throws = await rerankShortlist(big, win, { runModel: async () => { throw new Error('model limit'); } });
+    assert.strictEqual(throws, null, 'model error must fall back to null (deterministic)');
+    console.log('[TEST] curation (TASK-231): taste rules, top-10, anti-repetition, feedback, LLM re-rank + fallback OK');
   }
   console.log(`[TEST] fixture/date/source-probe tests passed (${fixtures.length} fixtures)`);
 }
@@ -7949,9 +8196,47 @@ async function main() {
   const twoStage = await enrichPromisingCandidates(scored, window);
   scored.sort((a, b) => b.score.total - a.score.total);
   console.log(`Two-stage scoring: accepted=${twoStage.accepted} promising=${twoStage.promising} detailFetches=${twoStage.fetchAttempts}/${twoStage.enrichableAccepted} (systematic baseline) success=${twoStage.fetchSuccess} failures=${twoStage.fetchFailures} rescored=${twoStage.enrichedRescored} improved=${twoStage.improved} in ${twoStage.elapsedMs}ms`);
+
+  // TASK-231 curation: taste rules + persisted feedback, then re-sort on the curated
+  // total. Anti-repetition excludes anything shown in a recent digest.
+  const shownState = loadShownState();
+  const excludeSignatures = shownSignaturesWithin(shownState);
+  const feedback = loadTasteFeedback();
+  applyTasteCuration(scored, window, { feedback });
+  scored.sort((a, b) => b.score.total - a.score.total);
+  console.log(`Taste curation: applied to ${scored.length} events; feedback rules=${feedback.rules.length}; anti-repetition excludes=${excludeSignatures.size}`);
+
+  // TASK-231 LLM re-rank of the curated shortlist pool. Bounded (~18 events), and
+  // fully fallback-safe: any error/timeout/parse failure keeps the deterministic
+  // order so the digest never regresses. Skipped with KA_RERANK=0.
+  if (process.env.KA_RERANK !== '0') {
+    try {
+      const { rerankShortlist } = require('./automation/rerank_llm.js');
+      const pool = scored
+        .filter(x => x.score.total >= 60 && !excludeSignatures.has(eventSignature(x.event)))
+        .slice(0, 18);
+      const rr = await rerankShortlist(pool, window, {});
+      if (rr && Array.isArray(rr.ranking) && rr.ranking.length) {
+        const byId = new Map(pool.map(x => [x.event.id, x]));
+        rr.ranking.forEach((r, idx) => {
+          const it = byId.get(r.id);
+          if (it) it.score.llm = { rank: idx + 1, why: (r.why || '').trim(), keep: r.keep !== false };
+        });
+        console.log(`LLM re-rank: ${rr.ranking.length}/${pool.length} candidates ranked (model=${rr.model || '?'})`);
+      } else {
+        console.log('LLM re-rank: no usable ranking → deterministic order (fallback)');
+      }
+    } catch (err) {
+      console.log(`LLM re-rank: error → deterministic fallback (${err.message})`);
+    }
+  } else {
+    console.log('LLM re-rank: disabled via KA_RERANK=0 → deterministic order');
+  }
+
+  const digestOpts = { size: DIGEST_SIZE, excludeSignatures };
   const quality = inspectQuality(normalized, accepted, rejected, sourceLogs);
-  const summary = telegramSummary(scored, window);
-  const reviewQueue = eventReviewQueue(scored, window);
+  const summary = telegramSummary(scored, window, digestOpts);
+  const reviewQueue = eventReviewQueue(scored, window, digestOpts);
 
   const now = new Date().toISOString().replace(/[:.]/g, '-');
   const outDir = path.join(process.cwd(), 'automation', 'out', `v02-${now}`);
@@ -7998,4 +8283,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille };

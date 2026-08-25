@@ -86,5 +86,10 @@ SENTINEL="$SENTINEL" GROUP="$GROUP" node -e '
   }, null, 2) + "\n");
 ' || alert_and_die "sent but failed to write sentinel: $SENTINEL"
 
+# TASK-231 anti-repetition: record the events we just sent so the next run won't
+# re-propose them. Non-fatal — a recording failure must not undo a successful send.
+log "post-send: record shown events (anti-repetition)"
+node automation/record_shown.js --run-dir="$RUNDIR" >&2 || log "(record_shown failed — continuing; digest already sent)"
+
 log "done — summary sent and sentinel written: $SENTINEL"
 exit 0

@@ -209,8 +209,15 @@ function deterministicSummaryLine(event, window) {
   line += inWindow(event.startDate, window)
     ? ` · ${frDateShort(event.startDate)}`
     : ` · à l’affiche ce week-end`;
-  const caveats = (event.caveats || []).filter(Boolean).slice(0, 2);
-  if (caveats.length) line += `. À vérifier : ${caveats.join(' ; ')}`;
+  // Prefer the LLM's concrete "pourquoi" (TASK-231) when present; else fall back to
+  // the practical caveats so the family always gets an actionable line.
+  const why = String(event.why || '').trim();
+  if (why) {
+    line += `. ${why.replace(/\.*$/, '')}`;
+  } else {
+    const caveats = (event.caveats || []).filter(Boolean).slice(0, 2);
+    if (caveats.length) line += `. À vérifier : ${caveats.join(' ; ')}`;
+  }
   return line.replace(/\s+/g, ' ').trim();
 }
 

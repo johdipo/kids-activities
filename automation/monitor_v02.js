@@ -30,7 +30,7 @@ function looksLikeTelegramSummary(text) {
   if (!hasFrenchSignals(text)) return false;
   if (/\|\s*[-:]+\s*\|/.test(text)) return false; // markdown table separator
   const itemCount = (text.match(/^\d+\.\s+/gm) || []).length;
-  if (itemCount > 7) return false;
+  if (itemCount > 12) return false; // TASK-231: digest is now a top-10 (was top-5)
   if (itemCount > 0 && !/https?:\/\//.test(text)) return false;
   return true;
 }
