@@ -625,6 +625,27 @@ const SOURCES = {
     baseUrl: 'https://www.centre-art-yverdon.ch',
     kind: 'typo3-news-contemporary-art-centre-agenda-yverdon'
   },
+  laMarive: {
+    // La Marive — grande salle de spectacles / centre de congrès d'Yverdon-les-Bains
+    // (au bord du lac, Quai de Nogent, ~1 km du centre → 0 km distance Yverdon).
+    // Programmation grand public à fort fit famille : spectacles, concerts, théâtre,
+    // danse (ballets « Le Lac des Cygnes »), cirque, humour, illusion « dès 6 ans »,
+    // souvent « GRATUIT pour les moins de 7 ans ». DISTINCT de `cacy` (art contemporain),
+    // `theatreBennoBesson` / `echandole` (autres scènes yverdonnoises) et de l'agenda Ville
+    // (`emoi` / `yverdonVille` listent l'agenda touristique, pas le programme propre de la
+    // salle) — dédup URL + clé de recommandation en aval absorbent tout recouvrement.
+    // Plateforme : TYPO3 CMS + plugin `news` (tx_news), MÊME famille que `cacy` /
+    // `bibliothequeYverdon` / `neuchatelVille` → réutilisation du pattern. La page
+    // /manifestations rend des cartes `div.gym-list-item` avec `.gym-list-cat` (catégorie),
+    // `.gym-list-date` (date `DD-MM-YYYY`, ANNÉE présente → pas d'inférence), un `h2 > a`
+    // (titre + lien `/manifestations/manifestations-details?tx_news_pi1[news]=<id>`). La fiche
+    // détail porte un bloc `.gym-single-additional-info` (« Date : DD.MM.YYYY au DD.MM.YYYY
+    // Horaire : HH:MM ») + un `.gym-single-date` (description libre : durée, âge conseillé,
+    // gratuité enfants). Scraping HTML cartes + enrichissement fiche pour l'heure et l'âge.
+    url: 'https://lamarive.ch/manifestations',
+    baseUrl: 'https://lamarive.ch',
+    kind: 'typo3-news-spectacle-venue-agenda-yverdon'
+  },
   sunsetJazz: {
     // Festival « Sunset Jazz » d'Estavayer-le-Lac (Broye / Lac de Neuchâtel,
     // ~22 km d'Yverdon) : jazz de rue estival dans le Bourg médiéval, organisé
@@ -6924,6 +6945,130 @@ async function scrapeCacy() {
   return uniqBy(upcoming, e => recommendationKey(e));
 }
 
+// ---------------------------------------------------------------------------
+// La Marive — salle de spectacles / congrès d'Yverdon-les-Bains (TYPO3 tx_news)
+// ---------------------------------------------------------------------------
+function fetchLaMariveHtml(url, timeoutMs = 20000) {
+  const maxTime = Math.max(5, Math.ceil(timeoutMs / 1000));
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
+}
+
+// Stable, cHash-free detail URL for a tx_news item (constant identity run to run).
+function laMariveDetailUrl(newsId, baseUrl = SOURCES.laMarive.baseUrl) {
+  return `${baseUrl}/manifestations/manifestations-details?tx_news_pi1%5Bnews%5D=${newsId}`;
+}
+
+// Parse a "DD.MM.YYYY" (detail) or "DD-MM-YYYY" (listing) date to an ISO YYYY-MM-DD.
+function laMariveDateToIso(text) {
+  const m = clean(text).match(/(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})/);
+  if (!m) return null;
+  return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+}
+
+function extractLaMariveListings(html, baseUrl = SOURCES.laMarive.baseUrl) {
+  const $ = cheerio.load(html);
+  const items = [];
+  $('.gym-list-item').each((_, el) => {
+    const $c = $(el);
+    const $a = $c.find('a[href*="manifestations-details"]').first();
+    const href = $a.attr('href') || '';
+    const idM = href.match(/tx_news_pi1(?:%5B|\[)news(?:%5D|\])=(\d+)/i);
+    const newsId = idM ? idM[1] : '';
+    const title = clean($c.find('h2 a').first().text() || $a.text());
+    // The date cell wraps the raw text in HTML comments (the pretty French form)
+    // plus the machine "DD-MM-YYYY"; strip comments before reading it.
+    const dateCell = $c.find('.gym-list-date').first();
+    dateCell.find('*').remove();
+    const dateText = clean(dateCell.text());
+    const category = clean($c.find('.gym-list-cat').first().text());
+    if (!newsId || !title) return;
+    items.push({ url: laMariveDetailUrl(newsId, baseUrl), newsId, title, dateText, category });
+  });
+  return uniqBy(items, x => x.newsId);
+}
+
+// Enrich a card from its detail page: authoritative date range + Horaire (from the
+// `.gym-single-additional-info` block), a free-text description (`.gym-single-date`,
+// with the leading raw date stripped), plus age / price evidence read from that text.
+function parseLaMariveDetail(html) {
+  const $ = cheerio.load(html);
+  const info = clean($('.gym-single-additional-info').first().text());
+  const dateRange = info.match(/Date\s*:\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4})(?:\s*au\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4}))?/i);
+  const startDate = dateRange ? laMariveDateToIso(dateRange[1]) : null;
+  const endRaw = dateRange && dateRange[2] ? laMariveDateToIso(dateRange[2]) : null;
+  const endDate = endRaw && endRaw !== startDate ? endRaw : null;
+  const timeM = info.match(/Horaire\s*:\s*(\d{1,2})\s*[:h]\s*(\d{2})/i);
+  const timeText = timeM ? `${timeM[1]}:${timeM[2]}` : '';
+  // The free-text description lives as bare <p> paragraphs inside `.gym-single-item`
+  // (duration, "Age conseillé, dès N ans", "GRATUIT pour les moins de 7 ans", plus
+  // billetterie boilerplate). The date sits in its own `.gym-single-date` cell, so the
+  // paragraphs never repeat it. Fall back to the date cell text if there are no <p>.
+  let body = clean($('.gym-single-item p').map((_, p) => $(p).text()).get().join(' '));
+  if (!body) {
+    body = clean($('.gym-single-date').first().text())
+      .replace(/^\s*\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4}(?:\s*au\s*\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4})?/i, '');
+    body = clean(body);
+  }
+  const hay = `${info} ${body}`;
+  // Only trust the explicit free-entry signals here. Ticketing is routed to an external
+  // provider (Ticketcorner), so any "CHF …" in the body is billetterie boilerplate —
+  // notably the "CHF 1.19/min." premium phone tariff — never the actual ticket price.
+  let priceText = '';
+  if (/gratuit|entr[ée]e libre|acc[èe]s libre/i.test(hay)) priceText = clean((hay.match(/entr[ée]e libre|acc[èe]s libre|gratuit[^.]{0,55}/i) || [''])[0]).slice(0, 90);
+  return { startDate, endDate, timeText, description: body, priceText };
+}
+
+function laMariveEventFromListing(l, detail = {}) {
+  const startIso = detail.startDate || laMariveDateToIso(l.dateText);
+  const startDate = startIso ? (detail.timeText ? isoDateZurich(startIso, detail.timeText) : startIso) : null;
+  const endDate = detail.endDate && detail.endDate !== startIso ? detail.endDate : null;
+  const desc = clean(detail.description || l.title);
+  const hay = `${l.title} ${l.category} ${desc}`;
+  const age = parseAge('', hay);
+  const tagHint = `${hay} la marive yverdon spectacle concert théâtre danse cirque humour famille scène`;
+  return normalizeEvent({
+    source: 'laMarive',
+    title: l.title,
+    startDate,
+    endDate,
+    locationName: 'La Marive — Yverdon-les-Bains',
+    locationText: 'La Marive, Quai de Nogent, Yverdon-les-Bains',
+    city: 'Yverdon-les-Bains',
+    url: l.url,
+    description: desc,
+    ageText: age.ageText,
+    priceText: detail.priceText || '',
+    tags: inferTags(tagHint),
+    sourceProvenance: `La Marive (Yverdon-les-Bains) — programme des manifestations: ${l.url}`,
+    officialSources: uniqBy([l.url, SOURCES.laMarive.url].filter(Boolean), x => x),
+    evidence: clean([l.category, l.dateText, detail.timeText, detail.priceText, desc].filter(Boolean).join(' | ')).slice(0, 1200)
+  });
+}
+
+async function scrapeLaMarive() {
+  const base = SOURCES.laMarive.url;
+  let listings = [];
+  try {
+    listings = extractLaMariveListings(fetchLaMariveHtml(base, 20000));
+  } catch (e) {
+    return [{ source: 'laMarive', title: 'La Marive — manifestations', url: base, error: e.message }];
+  }
+  const events = [];
+  const batchSize = 6;
+  for (let i = 0; i < listings.length; i += batchSize) {
+    const batch = listings.slice(i, i + batchSize);
+    const parsed = batch.map((l) => {
+      let detail = { startDate: null, endDate: null, timeText: '', description: '', priceText: '' };
+      try { detail = parseLaMariveDetail(fetchLaMariveHtml(l.url, 15000)); } catch { /* listing-level fallback */ }
+      return laMariveEventFromListing(l, detail);
+    });
+    events.push(...parsed);
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const upcoming = events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today);
+  return uniqBy(upcoming, e => recommendationKey(e));
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -6981,7 +7126,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy, laMarive: scrapeLaMarive });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -7787,6 +7932,42 @@ async function runFixtureTests() {
   assert.ok(/hors les murs : Théâtre Benno Besson/.test(cacyHorsMurs.locationText), 'CACY carries the hors-les-murs venue hint');
   assert.strictEqual(cacyHorsMurs.startDate, '2026-10-03T17:00:00+02:00', 'CACY hors-les-murs single day gets its time');
 
+  // --- La Marive — salle de spectacles d'Yverdon (TYPO3 tx_news) ---
+  const laMariveListings = extractLaMariveListings(
+    '<div class="gym-list-item"><div class="gym-list-content">'
+    + '<div class="gym-list-cat">Danse</div>'
+    + '<div class="gym-list-date"><!--24-nov-2026<br />--><!-- original24 novembre 2026-->24-11-2026</div>'
+    + '<h2><a href="/manifestations/manifestations-details?tx_news_pi1%5Baction%5D=eventDetail&amp;tx_news_pi1%5Bcontroller%5D=Event&amp;tx_news_pi1%5Bnews%5D=9650&amp;cHash=deadbeef"> Le Lac des Cygnes </a></h2>'
+    + '</div></div>'
+  );
+  assert.strictEqual(laMariveListings.length, 1, 'La Marive extracts the manifestation card');
+  assert.strictEqual(laMariveListings[0].newsId, '9650');
+  assert.strictEqual(laMariveListings[0].title, 'Le Lac des Cygnes');
+  assert.strictEqual(laMariveListings[0].category, 'Danse');
+  assert.strictEqual(laMariveListings[0].dateText, '24-11-2026', 'La Marive strips the HTML-comment date decorations');
+  assert.strictEqual(laMariveListings[0].url, 'https://lamarive.ch/manifestations/manifestations-details?tx_news_pi1%5Bnews%5D=9650', 'La Marive keeps a stable cHash-free detail URL');
+  const laMariveDetail = parseLaMariveDetail(
+    '<div class="gym-single-date">10.10.2026 au 10.10.2026 Durée du spectacle 1h20 sans entracte. Age conseillé, dès 6 ans. GRATUIT pour les enfants de moins de 7 ans assis sur les genoux d\'un adulte.</div>'
+    + '<div class="gym-single-additional-info">Informations utiles Date : 10.10.2026 au 10.10.2026 Horaire : 17:00 Contact / Billetterie</div>'
+  );
+  assert.strictEqual(laMariveDetail.startDate, '2026-10-10', 'La Marive reads the authoritative start date from the info block');
+  assert.strictEqual(laMariveDetail.endDate, null, 'La Marive collapses a same-day range to a single day');
+  assert.strictEqual(laMariveDetail.timeText, '17:00', 'La Marive reads the Horaire');
+  assert.ok(/dès 6 ans/.test(laMariveDetail.description), 'La Marive keeps the description after stripping the date prefix');
+  assert.ok(/gratuit/i.test(laMariveDetail.priceText), 'La Marive flags the free-under-7 evidence');
+  const laMariveEvent = laMariveEventFromListing(
+    { url: 'https://lamarive.ch/manifestations/manifestations-details?tx_news_pi1%5Bnews%5D=10001', newsId: '10001', title: 'Arsène Lupin, gentleman illusionniste', dateText: '10-10-2026', category: 'Spectacle / Concert / Théâtre' },
+    laMariveDetail);
+  assert.strictEqual(laMariveEvent.source, 'laMarive');
+  assert.strictEqual(laMariveEvent.startDate, '2026-10-10T17:00:00+02:00', 'La Marive applies the DST-aware detail time');
+  assert.strictEqual(laMariveEvent.city, 'Yverdon-les-Bains');
+  assert.strictEqual(laMariveEvent.ageMin, 6, 'La Marive extracts "dès 6 ans" as the min age');
+  assert.strictEqual(estimateDistanceKm(laMariveEvent), 0, 'La Marive resolves to 0 km (Yverdon-les-Bains)');
+  const laMariveNoDetail = laMariveEventFromListing(
+    { url: 'https://lamarive.ch/manifestations/manifestations-details?tx_news_pi1%5Bnews%5D=9626', newsId: '9626', title: 'Petits Déjeuners Contacts', dateText: '29-09-2026', category: 'Conférence' },
+    {});
+  assert.strictEqual(laMariveNoDetail.startDate, '2026-09-29', 'La Marive falls back to the listing date (date-level) without a detail page');
+
   const sunsetJazzHtml = '<div class="c-1"><header><h1>Programmation</h1></header><div class="row">'
     + '<div class="col-md-4"><div class="c-2"><header><h3>Vendredi 10 juillet 2026</h3></header><div class="row"><div class="col-md-12"><div id="accordion2" class="accordion">'
     + '<div class="accordion-item"><h2 class="accordion-header"><button class="accordion-button">Rue de l\'Hôtel de Ville</button></h2><div class="accordion-collapse"><div class="accordion-body"><p><strong>20:00 - 22:30: Julien Lemoine\'s - Lost in Swing</strong></p></div></div></div>'
@@ -8497,4 +8678,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive };
