@@ -284,9 +284,18 @@ const SOURCES = {
     kind: 'vaud-child-family-theatre-aggregator'
   },
   neuchatelVille: {
+    // RETIRÉ (TASK-233, 2026-09-01) — plus branché dans collectAll(). Deux raisons:
+    //   1. Time out systématique au garde 90 s (Culturoscope + fetch détail par
+    //      événement — classe TASK-228) → 0 event et run rallongé.
+    //   2. Couverture Neuchâtel-ville désormais absorbée par `j3l` (anneau lac 40 km +
+    //      allowlist littoral), qui tourne sur le backend DMO Neuchâtel Tourisme et
+    //      ramène le lac en une seule requête GeoJSON rapide.
+    // Config + parseurs (`extractNeuchatelVilleListings`) conservés pour la fixture-test
+    // et une éventuelle réactivation ciblée si j3l venait à manquer un pan de la ville.
     url: 'https://www.neuchatelville.ch/sortir-et-decouvrir/agenda',
     baseUrl: 'https://www.neuchatelville.ch',
-    kind: 'official-city-culturoscope-agenda'
+    kind: 'official-city-culturoscope-agenda',
+    retired: true
   },
   avenches: {
     url: 'https://www.avenches.ch/fr/Z14820/agenda-des-manifestations',
@@ -491,16 +500,35 @@ const SOURCES = {
     // avec, par événement, coordonnées géo, ville, région, catégorie, description et
     // dateFrom/dateTo — pas de pagination ni de JS à exécuter, tout est en clair.
     // Le canton entier est trop large (task warning « over-broad canton coverage »),
-    // donc la source est **géo-restreinte** à un rayon de RADIUS_KM à vol d'oiseau
-    // autour d'Yverdon: ne garde que le Nord vaudois + rive sud du lac de Neuchâtel /
-    // Broye / Val-de-Travers proches (festivals, fêtes de village, marchés terroir,
-    // plein-air — fit La Dérivée). Ce rayon exclut de fait Neuchâtel-ville (~38 km,
-    // déjà `neuchatelVille`) et le Jura/Bienne lointains; le dédup URL/recommandation
-    // en aval absorbe les recoupements avec `castrum`/`payerne`/`fribourgTerroir`.
+    // donc la source est **géo-restreinte** à deux anneaux à vol d'oiseau autour
+    // d'Yverdon (J3L_YVERDON):
+    //   1. Anneau général `radiusKm` (30 km): Nord vaudois + rive sud du lac de
+    //      Neuchâtel / Broye / Val-de-Travers proches, toutes villes confondues.
+    //   2. Anneau lac `lakeshoreRadiusKm` (40 km): étendu jusqu'à Neuchâtel-ville et
+    //      son littoral, mais **uniquement** pour les villes de la liste lacustre
+    //      `lakeshoreCities` (Neuchâtel, Hauterive, St-Blaise, Cornaux, Cudrefin, Le
+    //      Landeron, Marin, littoral NE…). Cela ramène Neuchâtel-ville et les fêtes du
+    //      lac (type Street Food Festival) — dans les goûts de Johan (lacustre) — sans
+    //      rouvrir l'over-broad: les Montagnes neuchâteloises (La Chaux-de-Fonds, Le
+    //      Locle), le Val-de-Ruz et le Jura/Bienne du même anneau 30-40 km restent
+    //      exclus car hors allowlist. TASK-233 (2026-09-01): pivot « agrégateurs
+    //      d'abord » — neuchateltourisme.ch tourne sur le MÊME backend MyCity Tourism
+    //      que j3l (mêmes pages Z10818, assets static.j3l.ch), donc élargir j3l EST
+    //      l'intégration de l'agrégateur DMO Neuchâtel Tourisme (pas de source séparée
+    //      redondante). Absorbe et remplace l'ancienne source `neuchatelVille`
+    //      (Culturoscope, retirée: time out 90 s récurrent — TASK-228). Le dédup
+    //      recommendationKey (titre+date+ville) en aval absorbe les recoupements avec
+    //      `castrum`/`payerne`/`fribourgTerroir`/`latenium` (Hauterive).
     url: 'https://www.j3l.ch/fr/Z10818/a-faire/manifestations/agenda',
     baseUrl: 'https://www.j3l.ch',
     radiusKm: 30,
-    kind: 'regional-tourism-geojson-agenda-geoscoped'
+    lakeshoreRadiusKm: 40,
+    // Villes du littoral neuchâtelois / rive du lac gardées dans l'anneau 30-40 km.
+    // Testé sur la longitude vol d'oiseau; volontairement sans La Chaux-de-Fonds / Le
+    // Locle / Val-de-Ruz / Valangin (montagnes, hors goût lacustre) qui tombent aussi
+    // dans 30-40 km mais restent exclus.
+    lakeshoreCities: /neuch[aâ]tel|hauterive|st[- ]?blaise|saint[- ]?blaise|cornaux|cudrefin|le\s?landeron|\bmarin\b|saint[- ]?aubin|bevaix|boudry|colombier|auvernier|cortaillod|b[oô]le|peseux|serri[èe]res|vaumarcus|gorgier|chez[- ]?le[- ]?bart|monruz|la\s?coudre/i,
+    kind: 'regional-tourism-geojson-agenda-geoscoped-lakeshore'
   },
   grandsonChateau: {
     // Château de Grandson — agenda propre du château (Place du Château, 1422 Grandson,
@@ -6261,17 +6289,25 @@ function extractJ3lFeatures(html) {
   return Array.isArray(data && data.features) ? data.features : [];
 }
 
-// Keep features within `radiusKm` of Yverdon (straight-line) that have a valid
+// Keep features within the geo scope of Yverdon (straight-line) that have a valid
 // upcoming date, carrying the computed distance for evidence/annotation.
-function j3lScopedRows(features, radiusKm = SOURCES.j3l.radiusKm, todayIso = new Date().toISOString().slice(0, 10)) {
+// Two rings: everything within `radiusKm` (30 km, all cities), plus the Neuchâtel
+// lakeshore band out to `lakeshoreRadiusKm` (40 km) but only for cities matching the
+// `lakeshoreCities` allowlist — so Neuchâtel-ville & littoral come in without pulling
+// the mountains (La Chaux-de-Fonds / Le Locle / Val-de-Ruz) that share that band.
+function j3lScopedRows(features, radiusKm = SOURCES.j3l.radiusKm, todayIso = new Date().toISOString().slice(0, 10), lakeshoreRadiusKm = SOURCES.j3l.lakeshoreRadiusKm, lakeshoreCities = SOURCES.j3l.lakeshoreCities) {
   const rows = [];
+  const lakeMax = lakeshoreRadiusKm || radiusKm;
   for (const f of features || []) {
     const p = f && f.properties;
     const g = f && f.geometry;
     if (!p || !g || g.type !== 'Point' || !Array.isArray(g.coordinates)) continue;
     const [lon, lat] = g.coordinates;
     const km = haversineKm(J3L_YVERDON.lat, J3L_YVERDON.lon, lat, lon);
-    if (km == null || km > radiusKm) continue;
+    if (km == null) continue;
+    const inNear = km <= radiusKm;
+    const inLakeshore = km <= lakeMax && lakeshoreCities && lakeshoreCities.test(clean(decodeHtmlEntities(p.city || p.label || p.subregion || '')));
+    if (!inNear && !inLakeshore) continue;
     const startDate = j3lIsoDate(p.dateFrom);
     if (!startDate) continue;
     const endIso = j3lIsoDate(p.dateTo);
@@ -7126,7 +7162,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, neuchatelVille: scrapeNeuchatelVille, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy, laMarive: scrapeLaMarive });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy, laMarive: scrapeLaMarive });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -7699,6 +7735,25 @@ async function runFixtureTests() {
   assert.strictEqual(estimateDistanceKm(j3lEvent), 15, 'J3L Cheyres should resolve a short distance from Yverdon');
   assert.strictEqual(j3lIsoDate('2026-09-05'), '2026-09-05');
   assert.strictEqual(j3lIsoDate('bogus'), null);
+  // J3L lakeshore ring (TASK-233): a Neuchâtel-ville lake event (~33 km, in allowlist)
+  // is kept while a La Chaux-de-Fonds mountain event (~40 km, NOT in allowlist) at the
+  // same band is dropped — proves Street-Food-Festival-type events would surface.
+  const j3lLakeHtml = '<html><body><script id="list-data" type="application/json">'
+    + JSON.stringify({ type: 'FeatureCollection', features: [
+        { type: 'Feature', geometry: { type: 'Point', coordinates: [6.931, 46.990] }, properties: { type: 'poi', id: 2701, title: 'Neuchâtel Street Food Festival', subtitle: 'Fête, festival', objectCategory: 'Fête, festival', text: 'Food trucks au bord du lac, entrée libre, familial.', href: '/fr/P2701', city: 'Neuchâtel', subregion: 'Littoral neuchâtelois', dateFrom: '2026-08-27', dateTo: '2026-08-30' } },
+        { type: 'Feature', geometry: { type: 'Point', coordinates: [6.828, 47.100] }, properties: { type: 'poi', id: 2702, title: 'Marché de La Chaux-de-Fonds', subtitle: 'Marché', objectCategory: 'Marché', text: 'Montagnes neuchâteloises.', href: '/fr/P2702', city: 'La Chaux-de-Fonds', subregion: 'Montagnes neuchâteloises', dateFrom: '2026-09-05', dateTo: '2026-09-05' } }
+      ] })
+    + '</script></body></html>';
+  const j3lLakeFeatures = extractJ3lFeatures(j3lLakeHtml);
+  const nearOnly = j3lScopedRows(j3lLakeFeatures, 30, '2026-08-01', 30); // no lakeshore ring -> both out of 30 km
+  assert.strictEqual(nearOnly.length, 0, 'J3L 30 km ring alone drops both Neuchâtel (~33 km) and La Chaux-de-Fonds (~40 km)');
+  const withLake = j3lScopedRows(j3lLakeFeatures, 30, '2026-08-01', 40, SOURCES.j3l.lakeshoreCities);
+  assert.strictEqual(withLake.length, 1, 'J3L lakeshore ring keeps only the allowlisted Neuchâtel lake event, not the mountain city');
+  assert.strictEqual(withLake[0].p.city, 'Neuchâtel');
+  assert.ok(withLake[0].straightKm > 30 && withLake[0].straightKm <= 40, 'J3L Neuchâtel lake event sits in the 30-40 km band');
+  const j3lLakeEvent = j3lEventFromRow(withLake[0]);
+  assert.strictEqual(j3lLakeEvent.source, 'j3l');
+  assert.ok(/street food/i.test(j3lLakeEvent.title), 'J3L lakeshore surfaces the Neuchâtel Street Food Festival title');
   // --- Château de Grandson ---------------------------------------------------
   assert.deepStrictEqual(parseGrandsonChateauDates('Samedi 8 et dimanche 9 août 2026'), [{ startDate: '2026-08-08', endDate: '2026-08-09' }], 'Grandson château contiguous weekend -> multi-day range');
   assert.deepStrictEqual(parseGrandsonChateauDates('12, 16, 19 et 23 août 2026'), [
