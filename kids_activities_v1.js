@@ -674,6 +674,40 @@ const SOURCES = {
     baseUrl: 'https://lamarive.ch',
     kind: 'typo3-news-spectacle-venue-agenda-yverdon'
   },
+  vaudTourisme: {
+    // Vaud.ch — agenda officiel des manifestations du Canton de Vaud (Vaud
+    // Promotion / SIT touristique cantonal). AGRÉGATEUR À HAUT RENDEMENT (priorité
+    // stratégique TASK-233 : colonne vertébrale plutôt que sites de village) : ~1460
+    // manifestations couvrant d'un coup des centaines d'organisateurs (festivals,
+    // marchés, terroir/caves, expos, spectacles, fêtes) — exactement le type de
+    // signal La Dérivée / famille / plein-air recherché.
+    // Backend : WordPress + widget carto (localhub.ch). Deux endpoints admin-ajax
+    // publics (POST) sur `ajaxUrl` :
+    //   • `fetch_events_map` → JSON {data.items:[{id:"<ulid>-0", title, category,
+    //     lat, lng, slug, image}]} pour TOUTES les manifestations (coordonnées →
+    //     géo-restriction fiable). Pas de date dans ce flux.
+    //   • `search_events` (data_type=events, version_2, start/end=YYYY-MM-DD,
+    //     posts_limit, lang=fr) → JSON {content:"<cartes HTML>", total} filtré par
+    //     PLAGE DE DATES. Les cartes portent data-id (= ulid sans suffixe), titre
+    //     (h3), catégorie (.event-cat), lieu/DMO (.location) et l'URL de fiche FR
+    //     `/tourisme/tous-les-evenements/<slug>`. Pas de date explicite sur la carte,
+    //     mais le filtre start=end=jour est EXACT (vérifié : lun 12, w-e 176, etc.).
+    // Stratégie d'extraction : (1) charger l'index carto une fois pour les coords ;
+    // (2) interroger `search_events` jour par jour sur un horizon borné → reconstituer
+    // la date exacte de chaque manifestation ; (3) fusionner les jours contigus d'un
+    // même id en une plage {startDate,endDate} ; (4) jointure sur l'id → géo-restriction
+    // haversine autour d'Yverdon. Le canton est trop large (Lausanne ~29 km inonderait
+    // le pool de ~500 spectacles), donc rayon 25 km : couvre Nord vaudois + Broye +
+    // bord Vallée de Joux (Payerne 23, Vallorbe 22, Estavayer 17, Orbe/Grandson/
+    // Yvonand/Sainte-Croix/Échallens) et exclut Lausanne/Morges/Montreux. Niveau date
+    // (pas d'heure/prix au listing, comme `j3l`/`avenches`).
+    ajaxUrl: 'https://www.vaud.ch/wp/wp-admin/admin-ajax.php',
+    referer: 'https://www.vaud.ch/tourisme/tous-les-evenements/',
+    baseUrl: 'https://www.vaud.ch',
+    radiusKm: 25,
+    horizonDays: 21,
+    kind: 'official-canton-vaud-tourism-events-aggregator'
+  },
   sunsetJazz: {
     // Festival « Sunset Jazz » d'Estavayer-le-Lac (Broye / Lac de Neuchâtel,
     // ~22 km d'Yverdon) : jazz de rue estival dans le Bourg médiéval, organisé
@@ -7105,6 +7139,178 @@ async function scrapeLaMarive() {
   return uniqBy(upcoming, e => recommendationKey(e));
 }
 
+// --- Vaud.ch — agenda officiel des manifestations du Canton de Vaud -----------
+// Agrégateur cantonal haut rendement géo-restreint autour d'Yverdon. Détails du
+// backend et de la stratégie dans SOURCES.vaudTourisme.
+// Async POST (never execFileSync) so the ~horizon day-requests never block the
+// shared event loop / SOURCE_TIMEOUT guard, and can run with bounded concurrency.
+async function fetchVaudAjax(params, timeoutMs = 25000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const body = Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+    const res = await fetch(SOURCES.vaudTourisme.ajaxUrl, {
+      method: 'POST', signal: controller.signal,
+      headers: {
+        'user-agent': 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)',
+        'x-requested-with': 'XMLHttpRequest',
+        referer: SOURCES.vaudTourisme.referer,
+        'content-type': 'application/x-www-form-urlencoded; charset=UTF-8'
+      },
+      body
+    });
+    if (!res.ok) throw new Error(`${params.action} -> HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Derive a clean city from a DMO/region label ("Moudon Tourisme" -> "Moudon",
+// "Yverdon-les-Bains Région" -> "Yverdon-les-Bains"), preferring an explicit city
+// recognised in the title/label, and leaving multi-word destination brands
+// ("Jura & Trois-Lacs", "Vallée de Joux") untouched when nothing better is found.
+function vaudTourismeCity(region, title = '') {
+  const known = cityFromLocation(`${title} ${region}`, '');
+  if (known) return known;
+  const stripped = clean((region || '').replace(/\s*\b(tourisme|tourism|région|region)\b\s*$/i, ''));
+  return stripped || clean(region);
+}
+
+// Build ulid -> {lat,lng} index from the carto endpoint. The map ids carry an
+// occurrence suffix ("<ulid>-0") that the search-card data-id omits, so we key on
+// the bare ulid.
+function vaudTourismeMapIndex(mapJson) {
+  const index = new Map();
+  const items = (mapJson && mapJson.data && Array.isArray(mapJson.data.items)) ? mapJson.data.items : [];
+  for (const it of items) {
+    if (!it || !it.id) continue;
+    const ulid = String(it.id).replace(/-\d+$/, '');
+    const lat = Number(it.lat), lng = Number(it.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat === 0 || lng === 0) continue;
+    if (!index.has(ulid)) index.set(ulid, { lat, lng });
+  }
+  return index;
+}
+
+// Parse the HTML event cards returned by `search_events` into light listing rows.
+function parseVaudEventCards(contentHtml, baseUrl = SOURCES.vaudTourisme.baseUrl) {
+  const $ = cheerio.load(contentHtml || '');
+  const rows = [];
+  $('a.event-card').each((_, a) => {
+    const $a = $(a);
+    const id = clean($a.attr('data-id') || '');
+    if (!id) return;
+    const url = canonicalUrl($a.attr('href'), baseUrl);
+    const title = clean(decodeHtmlEntities($a.find('h3').first().text()));
+    const category = clean(decodeHtmlEntities($a.find('.event-cat').first().text()));
+    const location = clean(decodeHtmlEntities($a.find('.location').first().text()));
+    if (!title) return;
+    rows.push({ id, url, title, category, location });
+  });
+  return rows;
+}
+
+// Merge a sorted list of ISO day strings into contiguous {startDate,endDate} runs.
+// Consecutive calendar days collapse into one multi-day range; gaps (e.g. a weekly
+// recurrence) split into separate occurrences. endDate is null for single days,
+// matching the rest of the schema.
+function collapseDateRuns(isoDays) {
+  const days = [...new Set((isoDays || []).filter(Boolean))].sort();
+  const nextDay = iso => { const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); };
+  const runs = [];
+  let start = null, prev = null;
+  for (const day of days) {
+    if (start == null) { start = prev = day; continue; }
+    if (day === nextDay(prev)) { prev = day; continue; }
+    runs.push({ startDate: start, endDate: start === prev ? null : prev });
+    start = prev = day;
+  }
+  if (start != null) runs.push({ startDate: start, endDate: start === prev ? null : prev });
+  return runs;
+}
+
+// Turn one grouped manifestation (all the days it was seen) into normalized events,
+// geo-scoped by the map coordinates to a radius around Yverdon.
+function vaudTourismeEventsFromGroup(group, coords, radiusKm = SOURCES.vaudTourisme.radiusKm) {
+  const km = coords ? haversineKm(J3L_YVERDON.lat, J3L_YVERDON.lon, coords.lat, coords.lng) : null;
+  if (km == null || km > radiusKm) return [];
+  const straightKm = Math.round(km * 10) / 10;
+  const title = clean(decodeHtmlEntities(group.title || ''));
+  const category = clean(decodeHtmlEntities(group.category || ''));
+  const region = clean(decodeHtmlEntities(group.location || ''));
+  const city = vaudTourismeCity(region, title);
+  const hay = `${title} ${category} ${region}`.toLowerCase();
+  const ageText = /famille|enfant|jeune public|tout public|kids|petits|jeunesse/.test(hay) ? 'famille / tout public (à confirmer)' : '';
+  const priceText = /gratuit|entrée libre|entree libre|accès libre|acces libre|offert|chapeau/.test(hay) ? 'Gratuit / accès libre (à confirmer)' : '';
+  return collapseDateRuns(group.dates).map(run => normalizeEvent({
+    source: 'vaudTourisme',
+    title,
+    startDate: run.startDate,
+    endDate: run.endDate,
+    locationName: region || city,
+    locationText: region,
+    city,
+    url: group.url,
+    description: [category ? `Catégorie: ${category}.` : '', region ? `Région: ${region}.` : ''].filter(Boolean).join(' '),
+    ageText,
+    priceText,
+    tags: inferTags(`${title} ${category} ${region} plein air festival terroir famille`),
+    sourceProvenance: `Vaud.ch — agenda officiel Canton de Vaud (${category || 'manifestation'}, ~${straightKm} km d'Yverdon): ${group.url}`,
+    officialSources: [group.url].filter(Boolean),
+    evidence: clean([
+      title,
+      `${run.startDate}${run.endDate ? ` → ${run.endDate}` : ''}`,
+      region && `région ${region}`,
+      category,
+      `≈${straightKm} km d'Yverdon`
+    ].filter(Boolean).join(' | ')).slice(0, 1200)
+  }));
+}
+
+async function scrapeVaudTourisme() {
+  const cfg = SOURCES.vaudTourisme;
+  let mapIndex;
+  try {
+    mapIndex = vaudTourismeMapIndex(await fetchVaudAjax({ action: 'fetch_events_map', lang: 'fr' }, 30000));
+  } catch (e) {
+    return [{ source: 'vaudTourisme', title: 'Vaud.ch agenda', url: cfg.referer, error: e.message }];
+  }
+  // Walk a bounded forward horizon one day at a time so each returned card can be
+  // pinned to an exact date (the date filter is exact but the card carries no date).
+  // Days fetch with bounded concurrency to keep the pass well under the 90s guard.
+  const today = new Date().toISOString().slice(0, 10);
+  const days = Array.from({ length: cfg.horizonDays }, (_, i) => {
+    const d = new Date(today + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + i);
+    return d.toISOString().slice(0, 10);
+  });
+  const groups = new Map(); // ulid -> { title, url, category, location, dates:Set }
+  let queried = 0, cursor = 0;
+  async function worker() {
+    while (cursor < days.length) {
+      const day = days[cursor++];
+      let json;
+      try {
+        json = await fetchVaudAjax({ action: 'search_events', start: day, end: day, posts_limit: 300, version_2: 'true', data_type: 'events', lang: 'fr' }, 20000);
+      } catch { continue; }
+      queried++;
+      for (const row of parseVaudEventCards(json && json.content)) {
+        let g = groups.get(row.id);
+        if (!g) { g = { title: row.title, url: row.url, category: row.category, location: row.location, dates: new Set() }; groups.set(row.id, g); }
+        g.dates.add(day);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(5, days.length) }, worker));
+  const events = [];
+  for (const [ulid, g] of groups) {
+    events.push(...vaudTourismeEventsFromGroup({ ...g, dates: [...g.dates] }, mapIndex.get(ulid), cfg.radiusKm));
+  }
+  const upcoming = events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today);
+  return { events: uniqBy(upcoming, e => recommendationKey(e)), note: `${queried}/${cfg.horizonDays} jours interrogés, ${groups.size} manifestations datées, ${upcoming.length} retenues dans le rayon ${cfg.radiusKm} km` };
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -7162,7 +7368,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy, laMarive: scrapeLaMarive });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy, laMarive: scrapeLaMarive, vaudTourisme: scrapeVaudTourisme });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -8023,6 +8229,42 @@ async function runFixtureTests() {
     {});
   assert.strictEqual(laMariveNoDetail.startDate, '2026-09-29', 'La Marive falls back to the listing date (date-level) without a detail page');
 
+  // --- Vaud.ch (agrégateur cantonal géo-restreint) ---------------------------
+  const vaudMapIndex = vaudTourismeMapIndex({ data: { items: [
+    { id: '01near-0', title: 'Fête near', lat: 46.78, lng: 6.64 },   // ~0 km Yverdon
+    { id: '01far-0', title: 'Show Lausanne', lat: 46.5197, lng: 6.6323 }, // ~29 km
+    { id: '01zero-0', title: 'Bad coords', lat: 0, lng: 0 }
+  ] } });
+  assert.ok(vaudMapIndex.has('01near') && vaudMapIndex.has('01far'), 'Vaud map index keys on the bare ulid (no occurrence suffix)');
+  assert.ok(!vaudMapIndex.has('01zero'), 'Vaud map index drops 0/0 placeholder coordinates');
+  const vaudCards = parseVaudEventCards(
+    '<div class="col-md-6"><a href="https://www.vaud.ch/tourisme/tous-les-evenements/fete-terroir" data-id="01near" class="event-card v2">'
+    + '<div class="img-wrap"><div class="event-cat"><span>Gastronomie &amp; vin</span></div></div>'
+    + '<div class="event-content"><h3>Fête du terroir</h3><div class="post-meta"><span class="location"><img src="x.svg">Yverdon-les-Bains Région</span></div></div></a></div>');
+  assert.strictEqual(vaudCards.length, 1, 'Vaud parses one event card');
+  assert.strictEqual(vaudCards[0].id, '01near');
+  assert.strictEqual(vaudCards[0].title, 'Fête du terroir');
+  assert.strictEqual(vaudCards[0].category, 'Gastronomie & vin');
+  assert.strictEqual(vaudCards[0].location, 'Yverdon-les-Bains Région', 'Vaud reads the DMO/region label');
+  assert.strictEqual(vaudCards[0].url, 'https://www.vaud.ch/tourisme/tous-les-evenements/fete-terroir');
+  // Contiguous days collapse into a range; a gap splits into separate occurrences.
+  assert.deepStrictEqual(collapseDateRuns(['2026-09-12', '2026-09-13', '2026-09-14']), [{ startDate: '2026-09-12', endDate: '2026-09-14' }], 'collapseDateRuns merges contiguous days into a range');
+  assert.deepStrictEqual(collapseDateRuns(['2026-09-12', '2026-09-19']), [{ startDate: '2026-09-12', endDate: null }, { startDate: '2026-09-19', endDate: null }], 'collapseDateRuns splits non-contiguous days into single occurrences');
+  assert.deepStrictEqual(collapseDateRuns(['2026-09-30', '2026-10-01']), [{ startDate: '2026-09-30', endDate: '2026-10-01' }], 'collapseDateRuns bridges a month boundary');
+  const vaudNear = vaudTourismeEventsFromGroup({ title: 'Fête du terroir', url: 'https://www.vaud.ch/tourisme/tous-les-evenements/fete-terroir', category: 'Marché', location: 'Yverdon-les-Bains Région', dates: ['2026-09-12', '2026-09-13'] }, vaudMapIndex.get('01near'));
+  assert.strictEqual(vaudNear.length, 1, 'Vaud emits one ranged event for two contiguous days');
+  assert.strictEqual(vaudNear[0].source, 'vaudTourisme');
+  assert.strictEqual(vaudNear[0].startDate, '2026-09-12');
+  assert.strictEqual(vaudNear[0].endDate, '2026-09-13');
+  assert.ok(/km d'Yverdon/.test(vaudNear[0].sourceProvenance), 'Vaud annotates the straight-line distance');
+  const vaudFar = vaudTourismeEventsFromGroup({ title: 'Show Lausanne', url: 'u', category: 'Théâtre', location: 'Lausanne', dates: ['2026-09-12'] }, vaudMapIndex.get('01far'));
+  assert.strictEqual(vaudFar.length, 0, 'Vaud geo-filter drops Lausanne (~29 km > 25 km radius)');
+  const vaudNoCoords = vaudTourismeEventsFromGroup({ title: 'Orphan', url: 'u', category: '', location: '', dates: ['2026-09-12'] }, undefined);
+  assert.strictEqual(vaudNoCoords.length, 0, 'Vaud drops events without map coordinates (cannot geo-scope)');
+  assert.strictEqual(vaudTourismeCity('Moudon Tourisme'), 'Moudon', 'Vaud strips the "Tourisme" suffix off a DMO label');
+  assert.strictEqual(vaudTourismeCity('Yverdon-les-Bains Région'), 'Yverdon-les-Bains', 'Vaud recognises a known city inside the region label');
+  assert.strictEqual(vaudTourismeCity('Vallée de Joux'), 'Vallée de Joux', 'Vaud keeps a multi-word destination brand intact');
+
   const sunsetJazzHtml = '<div class="c-1"><header><h1>Programmation</h1></header><div class="row">'
     + '<div class="col-md-4"><div class="c-2"><header><h3>Vendredi 10 juillet 2026</h3></header><div class="row"><div class="col-md-12"><div id="accordion2" class="accordion">'
     + '<div class="accordion-item"><h2 class="accordion-header"><button class="accordion-button">Rue de l\'Hôtel de Ville</button></h2><div class="accordion-collapse"><div class="accordion-body"><p><strong>20:00 - 22:30: Julien Lemoine\'s - Lost in Swing</strong></p></div></div></div>'
@@ -8733,4 +8975,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive, vaudTourismeMapIndex, parseVaudEventCards, collapseDateRuns, vaudTourismeCity, vaudTourismeEventsFromGroup, scrapeVaudTourisme };
