@@ -17,6 +17,10 @@ automation/out/
 automation/tmp/
 automation/logs/
 automation/state/
+tmp/
+
+# Copyrighted / private source material (e.g. La Suisse En Famille e-book) — never commit
+*.pdf
 
 # Sensitive
 .env
