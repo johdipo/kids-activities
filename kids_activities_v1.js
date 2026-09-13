@@ -475,6 +475,24 @@ const SOURCES = {
     baseUrl: 'https://www.buskersfestival.ch',
     kind: 'street-arts-festival-neuchatel-agenda'
   },
+  neuchatelStreetFood: {
+    // Neuchâtel Street Food Festival (raté 30.08.2026, signalé par Johan): festival
+    // street-food au bord du lac de Neuchâtel (Place du Port), chaque fin d'été
+    // (édition 2026: 27–30 août). Fort fit goût Johan — street-food, plein-air,
+    // lacustre, convivial/famille — et **entrée libre** (FAQ du site: « L'entrée
+    // est-elle gratuite? Oui »). Site Squarespace: la home porte l'édition courante
+    // DATÉE dans un hero H2 ("DU 27 AU 30 AOÛT 2026", ou un « du 30 août au 2
+    // septembre 2027 » à cheval sur deux mois) + un bloc "Lieu … Horaires
+    // d'ouverture", le tout en HTML statique (pas de JS à exécuter). La source lit ce
+    // hero → un événement festival par édition; l'année à 4 chiffres est REQUISE, ce
+    // qui isole l'édition courante. Une fois l'édition passée / hors saison elle
+    // retourne 0 event, et capte automatiquement la prochaine édition dès que la date
+    // est mise à jour. Neuchâtel-ville est hors du rayon géo 25 km (~38 km), mais
+    // comme buskers c'est une source festival explicitement demandée par Johan.
+    url: 'https://www.neuchatelstreetfoodfest.ch/',
+    baseUrl: 'https://www.neuchatelstreetfoodfest.ch',
+    kind: 'squarespace-street-food-festival-neuchatel'
+  },
   castrum: {
     // Le Castrum (demandé par Johan 2026-08-06): festival pluridisciplinaire
     // d'Yverdon-les-Bains depuis 1979, chaque été au cœur historique (esplanade du
@@ -5945,6 +5963,73 @@ async function scrapeBuskers() {
   return uniqBy(events.filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today), e => recommendationKey(e));
 }
 
+// Parse the Neuchâtel Street Food Festival Squarespace home into the current
+// edition. The hero H2 carries the DATED range ("DU 27 AU 30 AOÛT 2026", or a
+// cross-month "du 30 août au 2 septembre 2027" where only the second month is
+// spelled out). An explicit 4-digit year is REQUIRED, which isolates the live
+// edition from any undated marketing copy. A "Lieu … <NPA> Neuchâtel … Horaires"
+// block gives the venue/city. Returns null when no dated edition is present.
+function parseNeuchatelStreetFoodInfo(html) {
+  const text = htmlToText(html);
+  const dayName = 'lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche';
+  const re = new RegExp(`du\\s+(?:${dayName})?\\s*(\\d{1,2})\\s*(${MONTH_RE})?\\.?\\s+au\\s+(?:${dayName})?\\s*(\\d{1,2})\\s+(${MONTH_RE})\\.?\\s+(\\d{4})`, 'i');
+  const m = text.match(re);
+  if (!m) return null;
+  const year = m[5];
+  const startMonth = MONTHS[(m[2] || m[4]).toLowerCase().replace(/\.$/, '')];
+  const endMonth = MONTHS[m[4].toLowerCase().replace(/\.$/, '')];
+  if (!startMonth || !endMonth) return null;
+  const startDate = `${year}-${startMonth}-${String(m[1]).padStart(2, '0')}`;
+  const endDate = `${year}-${endMonth}-${String(m[3]).padStart(2, '0')}`;
+  let city = 'Neuchâtel';
+  let locationText = 'Place du Port, 2000 Neuchâtel';
+  // Anchor on the "Lieu<venue>, <NPA> <city>" summary. The negative lookahead skips
+  // the "Lieu & accès" nav item, and the guard rejects any nav/menu text that slips in.
+  // City is a single capitalised token so it stops at the next capital when blocks
+  // are glued without a space by htmlToText ("2000 NeuchâtelHoraires" → "Neuchâtel").
+  const loc = text.match(/Lieu(?!\s*&)\s*([^,\d]{3,45}?),?\s*(\d{4})\s+([A-ZÀ-Ÿ][a-zà-ÿ'’-]{2,})/);
+  if (loc) {
+    const venue = clean(loc[1]);
+    if (venue && !/exposant|acc[èe]s|menu|festival|galerie|inscription/i.test(venue)) {
+      city = clean(loc[3]);
+      locationText = `${venue}, ${loc[2]} ${city}`;
+    }
+  }
+  const free = /entr[ée]e[^?]{0,30}gratuite\s*\?\s*oui/i.test(text) || /entr[ée]e\s+libre/i.test(text);
+  return { startDate, endDate, year, dateText: clean(m[0]), locationText, city, free };
+}
+
+async function scrapeNeuchatelStreetFood() {
+  let html;
+  try {
+    html = fetchBuskersHtml(SOURCES.neuchatelStreetFood.url);
+  } catch (e) {
+    return [{ source: 'neuchatelStreetFood', title: 'Neuchâtel Street Food Festival', url: SOURCES.neuchatelStreetFood.url, error: e.message }];
+  }
+  const info = parseNeuchatelStreetFoodInfo(html);
+  if (!info) return [];
+  const today = new Date().toISOString().slice(0, 10);
+  const venue = info.locationText.split(',')[0];
+  const event = normalizeEvent({
+    source: 'neuchatelStreetFood',
+    title: `Neuchâtel Street Food Festival ${info.year}`,
+    startDate: info.startDate,
+    endDate: info.endDate,
+    locationName: venue,
+    locationText: info.locationText,
+    city: info.city,
+    url: `${SOURCES.neuchatelStreetFood.url}#${sha(`nsf|${info.startDate}`)}`,
+    description: `Festival de street food au bord du lac de Neuchâtel (${venue}): des dizaines de food trucks et stands (cuisines du monde, sucré/salé), bars, musique et animations dans une ambiance conviviale et familiale en plein air.${info.free ? ' Entrée libre.' : ''}`,
+    ageText: 'tout public / famille',
+    priceText: info.free ? 'Entrée libre' : '',
+    tags: inferTags('festival street food food trucks plein air lac famille convivial gratuit Neuchâtel cuisine'),
+    sourceProvenance: `Neuchâtel Street Food Festival – ${SOURCES.neuchatelStreetFood.url} (${info.dateText})`,
+    officialSources: [SOURCES.neuchatelStreetFood.url],
+    evidence: clean(`${info.dateText} | ${info.startDate} → ${info.endDate} | ${info.locationText}${info.free ? ' | entrée libre' : ''}`).slice(0, 1200)
+  });
+  return [event].filter(e => e.title && e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today);
+}
+
 function fetchCastrumData(url, maxTime = 30) {
   return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 24 * 1024 * 1024 });
 }
@@ -7368,7 +7453,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy, laMarive: scrapeLaMarive, vaudTourisme: scrapeVaudTourisme });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, neuchatelStreetFood: scrapeNeuchatelStreetFood, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy, laMarive: scrapeLaMarive, vaudTourisme: scrapeVaudTourisme });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -7877,6 +7962,36 @@ async function runFixtureTests() {
   });
   assert.strictEqual(buskersRameeEvent.startDate, '2026-08-16T11:00:00+02:00', 'Buskers La Ramée should apply the DST-aware local start time');
   assert.strictEqual(estimateDistanceKm(buskersRameeEvent), 44, 'La Ramée (Marin-Epagnier) should resolve a distance from Yverdon');
+  // Neuchâtel Street Food Festival (Squarespace hero + "Lieu … Horaires" block):
+  // parse the DATED same-month range, the venue/city, and the free-entry FAQ answer;
+  // a cross-month range with only the second month spelled out must still resolve.
+  const nsfHtml = '<h2><strong>NEUCHÂTEL STREET FOOD FESTIVAL</strong><br>DU 27 AU 30 AOÛT 2026</h2>'
+    + '<div>30 août 2026</div><div>Lieu</div><div>Place du Port</div><div>2000 Neuchâtel</div>'
+    + '<div>Horaires d’ouverture</div><div>Jeudi : 17h - 22h</div>'
+    + '<h4>L’entrée est-elle gratuite ?</h4><p>Oui.</p>';
+  const nsf = parseNeuchatelStreetFoodInfo(nsfHtml);
+  assert.strictEqual(nsf.startDate, '2026-08-27', 'NSF should start 27 août 2026 (month inherited from the range end)');
+  assert.strictEqual(nsf.endDate, '2026-08-30', 'NSF should end 30 août 2026');
+  assert.strictEqual(nsf.year, '2026', 'NSF should read the explicit 4-digit edition year');
+  assert.strictEqual(nsf.locationText, 'Place du Port, 2000 Neuchâtel', 'NSF should parse venue + NPA + city from the Lieu block');
+  assert.strictEqual(nsf.city, 'Neuchâtel', 'NSF city should be Neuchâtel');
+  assert.strictEqual(nsf.free, true, 'NSF should detect free entry from the "gratuite ? Oui" FAQ');
+  const nsfCross = parseNeuchatelStreetFoodInfo('<h2>Édition 2027 : du 30 août au 2 septembre 2027 au bord du lac. Entrée libre.</h2>');
+  assert.strictEqual(nsfCross.startDate, '2027-08-30', 'NSF cross-month range should keep the August start');
+  assert.strictEqual(nsfCross.endDate, '2027-09-02', 'NSF cross-month range should roll the end into September');
+  assert.strictEqual(nsfCross.free, true, 'NSF should detect "entrée libre" phrasing too');
+  assert.strictEqual(parseNeuchatelStreetFoodInfo('<h2>Bientôt de retour au bord du lac !</h2>'), null, 'NSF should return null when no dated edition is published (off-season → 0 event)');
+  const nsfEvent = normalizeEvent({
+    source: 'neuchatelStreetFood', title: `Neuchâtel Street Food Festival ${nsf.year}`,
+    startDate: nsf.startDate, endDate: nsf.endDate,
+    locationName: 'Place du Port', locationText: nsf.locationText, city: nsf.city,
+    url: `${SOURCES.neuchatelStreetFood.url}#${sha(`nsf|${nsf.startDate}`)}`,
+    ageText: 'tout public / famille', priceText: 'Entrée libre',
+    tags: inferTags('festival street food food trucks plein air lac famille gratuit Neuchâtel'),
+    officialSources: [SOURCES.neuchatelStreetFood.url]
+  });
+  assert(nsfEvent.tags.includes('food') && nsfEvent.tags.includes('outdoor'), `NSF should carry food + outdoor taste tags; got ${nsfEvent.tags}`);
+  assert(/entrée libre/i.test(nsfEvent.priceText), 'NSF should keep free-entry price evidence');
   // Le Castrum (SvelteKit devalue __data.json): UTC session instants must shift to
   // DST-aware Europe/Zurich, never be taken verbatim.
   assert.strictEqual(castrumUtcToZurichIso('2026-08-08T12:00:00.000Z'), '2026-08-08T14:00:00+02:00', 'Castrum should shift a summer UTC session to +02:00 local');
@@ -8975,4 +9090,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive, vaudTourismeMapIndex, parseVaudEventCards, collapseDateRuns, vaudTourismeCity, vaudTourismeEventsFromGroup, scrapeVaudTourisme };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, parseNeuchatelStreetFoodInfo, scrapeNeuchatelStreetFood, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive, vaudTourismeMapIndex, parseVaudEventCards, collapseDateRuns, vaudTourismeCity, vaudTourismeEventsFromGroup, scrapeVaudTourisme };
