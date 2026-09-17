@@ -16,6 +16,12 @@ Il doit guider le scoring déterministe ET la passe LLM de curation (TASK-231).
   artistiques purs) → **déprioriser** nettement (malus), sauf angle clairement famille/enfant marqué.
 - **Balades / visites guidées génériques** (ex. « Balades découverte de Môtiers ») :
   **rien d'exceptionnel** → déprioriser les visites/balades passe-partout sans accroche forte.
+## Règles de goût (ajouts 2026-09-17, retour Johan)
+
+- **Concerts d'orgue / musique classique en église** : « nul » → malus fort, ne pas proposer.
+- **Sport-spectacle** (matchs Yverdon Sport FC, football en général) : aucun intérêt → malus fort.
+- **« Dimanche malin » (Yverdon)** : déjà fait → ne plus reproposer.
+
 - **Ce qui plaît** (rappel profil La Dérivée) : festivals, fêtes de village, terroir,
   plein-air, ateliers enfants concrets, nature/animaux/science, découverte, eau.
   Andy : intellectuel, sciences, ateliers. Lennon : animaux, insectes, nature, exploration.
@@ -51,6 +57,11 @@ obligatoire** : toute erreur/timeout/limite modèle garde l'ordre déterministe 
 Désactivable ponctuellement avec `KA_RERANK=0`. Aucun modèle n'est hardcodé (hérite du défaut OpenClaw).
 
 ## Historique des retours bruts
+- 2026-09-17 (Johan, via feedback CLI) : 👎 «football» (-12) — sport spectacle (matchs) sans intérêt famille
+- 2026-09-17 (Johan, via feedback CLI) : 👎 «yverdon-sport» (-25) — football/FC: aucun intérêt
+- 2026-09-17 (Johan, via feedback CLI) : 👎 «yverdon sport» (-25) — football/FC: aucun intérêt
+- 2026-09-17 (Johan, via feedback CLI) : 👎 «orgue» (-25) — concert d'orgue: nul
+- 2026-09-17 (Johan, via feedback CLI) : 👎 «dimanche malin» (-25) — déjà fait
 - 2026-08-25 (Johan, via feedback CLI) : 👎 «abeilles» (-25) — expo permanente déjà faite, ne plus proposer
 - 2026-08-25 (Johan) : « les expos Pro Natura sont biens mais pas exceptionnelles ; l'expo abeilles
   est permanente et déjà faite → privilégie les nouveautés et events ponctuels. On n'apprécie pas
