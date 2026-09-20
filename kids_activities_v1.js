@@ -169,7 +169,34 @@ const LOCATION_KM_FROM_YVERDON = {
   // La Sarraz). Le hameau d'Allens fait partie de la commune → résolu via city Cossonay.
   cossonay: 24,
   geneve: 85,
-  genève: 85
+  genève: 85,
+  // Terre&Nature (agenda nature/terroir romand) — localités rencontrées dans le flux,
+  // proches ET lointaines. Les lointaines sont listées exprès: sans entrée connue une
+  // commune inconnue retombe sur « distance inconnue » (score 10), soit MIEUX qu'une
+  // commune connue-lointaine (score 5). Distances routières approx. depuis Yverdon.
+  'jorat-mézières': 30,
+  'jorat-mezieres': 30,
+  'le locle': 55,
+  tolochenaz: 48,
+  'saint-george': 50,
+  veytaux: 65,
+  'les paccots': 65,
+  charmey: 70,
+  'château-d’œx': 85,
+  'chateau-d\'oex': 85,
+  'vers-l\'eglise': 90,
+  'vers-l’eglise': 90,
+  'saint-maurice': 95,
+  'saignelégier': 95,
+  saignelegier: 95,
+  'saint-leonard': 115,
+  'saint-léonard': 115,
+  'le châble': 120,
+  'le chable': 120,
+  'evolène': 130,
+  evolene: 130,
+  'val d’hérens': 130,
+  'val d\'herens': 130
 };
 const SOURCES = {
   grandson: {
@@ -725,6 +752,42 @@ const SOURCES = {
     radiusKm: 25,
     horizonDays: 21,
     kind: 'official-canton-vaud-tourism-events-aggregator'
+  },
+  terreNature: {
+    // Terre&Nature — hebdomadaire romand (fondé 1898) « agriculture, nature, terroir,
+    // jardin et loisirs verts ». Son agenda est un AGRÉGATEUR ROMAND CURATÉ, retenu
+    // au titre de la priorité stratégique TASK-233 (agrégateurs d'abord), et surtout
+    // le plus proche du SIGNAL DE GOÛT de Johan (La Dérivée / terroir / plein air) :
+    // marchés bio & artisanat, fêtes de village et du terroir, gratiferia, bains de
+    // forêt, labyrinthes de maïs, sentiers gourmands, expos nature — c'est-à-dire la
+    // veine que les agendas DMO (`vaudTourisme`, `j3l`, `fribourgTerroir`) noient
+    // dans les spectacles et que les agendas communaux ne voient qu'à l'échelle d'un
+    // village. Volume modeste (~37 fiches roulantes) mais très haut rapport signal/bruit.
+    // Backend : WordPress 6.9 exposant publiquement le CPT `agenda` en REST
+    // (`/wp-json/wp/v2/agenda`, taxonomie `themes-agenda`). L'index REST donne
+    // id/slug/link/title/excerpt mais PAS la date ni le lieu (champs ACF non exposés,
+    // `acf: []`) → la fiche HTML est la source d'autorité :
+    //   • ligne de date  : `.text-tn-dark-green` avant le `<h1>`
+    //     (« Du mardi 22 au dimanche 27 septembre 2026 »)
+    //   • ligne de lieu  : `.text-tn-dark-green` après le `<h1>` (« Orbe (VD) »)
+    //   • corps `.wysiwyg` : paragraphe « infos pratiques » (horaire, tarif/gratuité)
+    //     et liens « Plus de renseignements » vers le site de l'organisateur.
+    // Géo : la fiche ne donne qu'une commune + un canton (pas de coordonnées), donc
+    // le scoping passe par le gazetteer `LOCATION_KM_FROM_YVERDON` (rayon 45 km =
+    // palier « day-trip raisonnable » du scoring aval, le corpus étant trop petit
+    // pour justifier 25 km) ; une commune inconnue n'est gardée que si son canton est
+    // limitrophe (VD/FR/NE) — VS/GE/JU/BE sont écartés d'office.
+    // robots.txt : aucune interdiction IA (bloc « Contexte IA » explicite), mais
+    // `Crawl-delay: 5` → lecture des fiches par petits lots espacés.
+    url: 'https://www.terrenature.ch/agenda/',
+    apiUrl: 'https://www.terrenature.ch/wp-json/wp/v2/agenda',
+    baseUrl: 'https://www.terrenature.ch',
+    radiusKm: 45,
+    nearCantons: ['VD', 'FR', 'NE'],
+    maxDetails: 45,
+    detailBatchSize: 3,
+    detailPauseMs: 500,
+    kind: 'romandie-nature-terroir-curated-agenda-aggregator'
   },
   sunsetJazz: {
     // Festival « Sunset Jazz » d'Estavayer-le-Lac (Broye / Lac de Neuchâtel,
@@ -7396,6 +7459,211 @@ async function scrapeVaudTourisme() {
   return { events: uniqBy(upcoming, e => recommendationKey(e)), note: `${queried}/${cfg.horizonDays} jours interrogés, ${groups.size} manifestations datées, ${upcoming.length} retenues dans le rayon ${cfg.radiusKm} km` };
 }
 
+// --- Terre&Nature — agenda nature / terroir de Suisse romande ----------------
+
+const TERRE_NATURE_DOW = 'lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche';
+
+// The detail page carries exactly one authoritative date line. Observed shapes:
+//   "Samedi 26 septembre 2026"                             -> single day
+//   "Du mardi 22 au dimanche 27 septembre 2026"            -> range, month+year on the end only
+//   "Du jeudi 17 septembre 2026 au dimanche 25 avril 2027" -> range straddling New Year
+//   "Les 19 et 20 septembre"                               -> two-day range, year implicit
+function parseTerreNatureDateRange(text, today = new Date()) {
+  const t = clean(decodeHtmlEntities(text || '')).toLowerCase().replace(/(\d)\s*er\b/g, '$1');
+  if (!t) return { startDate: null, endDate: null };
+  const day = `(?:(?:${TERRE_NATURE_DOW})\\s+)?(\\d{1,2})`;
+  const iso = (y, m, d) => `${y}-${m}-${String(d).padStart(2, '0')}`;
+  const range = t.match(new RegExp(`(?:du|des|les)\\s+${day}(?:\\s+(${MONTH_RE})\\.?)?(?:\\s+(\\d{4}))?\\s+(?:au|et)\\s+${day}\\s+(${MONTH_RE})\\.?(?:\\s+(\\d{4}))?`));
+  if (range) {
+    const [, d1, m1, y1, d2, m2, y2] = range;
+    const endMonth = MONTHS[m2];
+    const startMonth = MONTHS[m1 || m2];
+    if (endMonth && startMonth) {
+      let endYear = Number(y2 || y1 || cacyInferYear(endMonth, String(d2).padStart(2, '0'), today));
+      // Only the end carries a month in the common shape, so a start month that is
+      // later in the calendar means the range crosses New Year.
+      const startYear = Number(y1 || (startMonth <= endMonth ? endYear : endYear - 1));
+      const startDate = iso(startYear, startMonth, d1);
+      // Guards the "Du 17 septembre 2026 au 25 avril" shape, where only the start
+      // year is printed and the end silently rolls into the next year.
+      if (iso(endYear, endMonth, d2) < startDate) endYear += 1;
+      return { startDate, endDate: iso(endYear, endMonth, d2) };
+    }
+  }
+  const single = t.match(new RegExp(`(?:^|\\s)(?:(?:${TERRE_NATURE_DOW})\\s+)?(\\d{1,2})\\s+(${MONTH_RE})\\.?(?:\\s+(\\d{4}))?`));
+  if (single) {
+    const month = MONTHS[single[2]];
+    const d = String(single[1]).padStart(2, '0');
+    return { startDate: iso(single[3] || cacyInferYear(month, d, today), month, d), endDate: null };
+  }
+  return { startDate: null, endDate: null };
+}
+
+// Location line shapes seen in the wild: "Estavayer-le-Lac (FR)", the all-lowercase
+// "sainte-croix (VD)", the CMS-duplicated "Saint-Leonard (VS) (VS)", and the
+// pseudo-location "Dans toute la Suisse (VD)" used for nationwide operations.
+function terreNatureLocation(raw) {
+  const t = clean(decodeHtmlEntities(raw || '')).replace(/\s*\(([A-Za-z]{2})\)(?:\s*\(\1\))+$/i, ' ($1)');
+  const m = t.match(/^(.*?)\s*\(([A-Za-z]{2})\)$/);
+  const canton = m ? m[2].toUpperCase() : '';
+  let city = clean(m ? m[1] : t);
+  if (/^(dans toute la suisse|toute la suisse|suisse romande|plusieurs lieux|divers lieux)$/i.test(city)) {
+    return { city: '', canton, nationwide: true };
+  }
+  if (city && city === city.toLowerCase()) {
+    city = city.replace(/(^|[\s\-'’])([a-zà-ÿ])/g, (s, p, c) => p + c.toUpperCase());
+  }
+  return { city, canton, nationwide: false };
+}
+
+// No coordinates on the page, so geo-scoping leans on the curated gazetteer and
+// falls back to a neighbouring-canton allowlist for communes not yet mapped.
+function terreNatureWithinScope(city, canton, nationwide = false, cfg = SOURCES.terreNature) {
+  const km = city ? estimateDistanceKm({ city, locationText: city }) : null;
+  if (km != null) return { keep: km <= cfg.radiusKm, km };
+  if (nationwide) return { keep: true, km: null };
+  return { keep: cfg.nearCantons.includes(canton), km: null };
+}
+
+// The last body paragraphs repeat the practical info: "Le 21 septembre, de 10h à 15h.
+// Entrée libre." / "Jusqu'au dimanche 4 octobre. Tarif: 8 fr. (adultes et enfants)."
+function terreNaturePractical(body = '') {
+  const lines = String(body).split('\n').map(clean).filter(Boolean);
+  const infoLines = lines.filter(l => /\b\d{1,2}\s*h(?:\d{2})?\b|tarif|prix|entr[ée]e|gratuit|libre|jusqu[’']au|\bfrs?\.|\bchf\b/i.test(l));
+  const schedule = infoLines.join(' ');
+  let priceText = '';
+  // Matched per line, never on the joined text: an amount and the next sentence's
+  // schedule live on different paragraphs and must not bleed into the price.
+  for (const line of infoLines) {
+    const m = line.match(/(?:tarifs?|prix|entr[ée]es?)[^:\n]{0,40}:\s*([^\n]{2,110})/i);
+    if (m) { priceText = clean(m[1]).split(/\s+Plus de renseignements/i)[0].replace(/[;,]\s*$/, ''); break; }
+  }
+  if (!priceText) {
+    // Only claim free when a line says so *without* also printing an amount:
+    // "12 fr. (adultes), entrée libre (enfants)" is a paid event, not a free one.
+    const free = infoLines.find(l => /entr[ée]e\s+(?:libre|gratuite)|acc[èe]s\s+libre|\bgratuit(?:e|es|s)?\b/i.test(l)
+      && !/\d\s*(?:fr\.?|frs\.?|chf)/i.test(l));
+    if (free) priceText = 'Gratuit / entrée libre (à confirmer)';
+  }
+  // Only trust a clock time for single-day events; multi-day fairs print per-day
+  // hours that cannot be pinned to the range start.
+  // Normalised to HH:MM so isoDateZurich picks it up ("10h" alone does not match it).
+  const time = schedule.match(/\b(?:de|d[èe]s|à)\s+(\d{1,2})\s*h\s*(\d{2})?/i);
+  return { priceText, timeText: time ? `${time[1]}:${time[2] || '00'}` : '', scheduleText: schedule.slice(0, 400) };
+}
+
+function extractTerreNatureDetailFields(html) {
+  const $ = cheerio.load(html);
+  const $article = $('article').first();
+  const scope = $article.length ? $article : $.root();
+  const monthRe = new RegExp(`\\b(?:${MONTH_RE})\\b`, 'i');
+  let dateText = '', locationText = '';
+  scope.find('.text-tn-dark-green').each((i, el) => {
+    const t = clean($(el).text());
+    if (!t) return;
+    if (!locationText && /\([A-Za-z]{2}\)\s*$/.test(t)) { locationText = t; return; }
+    if (!dateText && monthRe.test(t)) dateText = t;
+  });
+  const $h1 = scope.find('h1').first();
+  return {
+    title: clean($h1.text()),
+    lead: clean($h1.next().text()),
+    dateText,
+    locationText,
+    body: scope.find('.wysiwyg p').map((i, el) => clean($(el).text())).get().filter(p => p.length > 2).join('\n'),
+    links: scope.find('.wysiwyg a[href]').map((i, el) => clean($(el).attr('href'))).get()
+      .filter(h => /^https?:\/\//i.test(h) && !/terrenature\.ch/i.test(h))
+  };
+}
+
+// Returns { event } when in scope, { outOfScope: true } when the commune is too far
+// or outside the neighbouring cantons, or null when the page carries no usable date.
+function terreNatureEventFromDetail(html, listing = {}, opts = {}) {
+  const cfg = SOURCES.terreNature;
+  const fields = extractTerreNatureDetailFields(html);
+  const title = decodeHtmlEntities(listing?.title?.rendered || listing?.title || '') || fields.title;
+  const { startDate, endDate } = parseTerreNatureDateRange(fields.dateText, opts.today);
+  if (!title || !startDate) return null;
+  const { city, canton, nationwide } = terreNatureLocation(fields.locationText);
+  const scope = terreNatureWithinScope(city, canton, nationwide, cfg);
+  if (!scope.keep) return { outOfScope: true, city, canton, km: scope.km };
+  const url = canonicalUrl(listing.link || '', cfg.baseUrl) || cfg.url;
+  const lead = clean(htmlToText(listing?.excerpt?.rendered || '')) || fields.lead;
+  const practical = terreNaturePractical(fields.body);
+  const locationLabel = nationwide
+    ? 'Plusieurs lieux en Suisse (opération nationale)'
+    : clean([city, canton && `(${canton})`].filter(Boolean).join(' '));
+  return {
+    city,
+    canton,
+    km: scope.km,
+    event: normalizeEvent({
+      source: 'terreNature',
+      // A clock time is only pinned on single-day entries (see terreNaturePractical).
+      startDate: endDate ? startDate : isoDateZurich(startDate, practical.timeText),
+      endDate,
+      title,
+      locationName: locationLabel,
+      locationText: locationLabel,
+      city,
+      url,
+      description: clean([lead, practical.scheduleText].filter(Boolean).join(' ')),
+      priceText: practical.priceText,
+      tags: inferTags(`${title} ${lead} ${practical.scheduleText}`),
+      sourceProvenance: `Terre&Nature — agenda nature/terroir romand (${locationLabel}${scope.km != null ? `, ~${scope.km} km d'Yverdon` : ', distance à vérifier'}): ${url}`,
+      officialSources: uniqBy([url, ...fields.links].filter(Boolean), x => x),
+      evidence: clean([
+        title,
+        fields.dateText && `date « ${fields.dateText} »`,
+        `${startDate}${endDate ? ` → ${endDate}` : ''}`,
+        locationLabel && `lieu ${locationLabel}`,
+        practical.priceText && `tarif ${practical.priceText}`,
+        practical.scheduleText,
+        lead
+      ].filter(Boolean).join(' | ')).slice(0, 1200)
+    })
+  };
+}
+
+async function scrapeTerreNature() {
+  const cfg = SOURCES.terreNature;
+  let listings;
+  try {
+    listings = await fetchEmoiJson(`${cfg.apiUrl}?per_page=100&orderby=date&order=desc&_fields=id,slug,link,title,excerpt`, 30000);
+  } catch (e) {
+    return [{ source: 'terreNature', title: 'Terre&Nature agenda', url: cfg.url, error: e.message }];
+  }
+  if (!Array.isArray(listings) || !listings.length) return [];
+  const today = new Date().toISOString().slice(0, 10);
+  const deadline = Date.now() + 70000; // stay under the 90s per-source guard.
+  const slice = listings.slice(0, cfg.maxDetails);
+  const events = [];
+  let fetched = 0, outOfScope = 0, undated = 0;
+  for (let i = 0; i < slice.length; i += cfg.detailBatchSize) {
+    if (Date.now() > deadline) break;
+    // Small batches with a pause between them: robots.txt asks for Crawl-delay 5 and
+    // the whole corpus is only ~40 pages, so there is no need to hammer the site.
+    if (i) await new Promise(r => setTimeout(r, cfg.detailPauseMs));
+    const parsed = await Promise.all(slice.slice(i, i + cfg.detailBatchSize).map(async (listing) => {
+      try {
+        const html = await fetchHtml(listing.link, 20000);
+        fetched++;
+        return terreNatureEventFromDetail(html, listing);
+      } catch { return null; }
+    }));
+    for (const r of parsed) {
+      if (!r) { undated++; continue; }
+      if (r.outOfScope) { outOfScope++; continue; }
+      if (r.event) events.push(r.event);
+    }
+  }
+  const upcoming = events.filter(e => e.startDate && ((e.endDate || e.startDate) || '').slice(0, 10) >= today);
+  return {
+    events: uniqBy(upcoming, e => e.id),
+    note: `${fetched}/${slice.length} fiches lues, ${outOfScope} hors scope (>${cfg.radiusKm} km ou canton éloigné), ${undated} sans date exploitable, ${upcoming.length} retenues`
+  };
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -7453,7 +7721,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, neuchatelStreetFood: scrapeNeuchatelStreetFood, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy, laMarive: scrapeLaMarive, vaudTourisme: scrapeVaudTourisme });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, neuchatelStreetFood: scrapeNeuchatelStreetFood, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy, laMarive: scrapeLaMarive, vaudTourisme: scrapeVaudTourisme, terreNature: scrapeTerreNature });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -8380,6 +8648,64 @@ async function runFixtureTests() {
   assert.strictEqual(vaudTourismeCity('Yverdon-les-Bains Région'), 'Yverdon-les-Bains', 'Vaud recognises a known city inside the region label');
   assert.strictEqual(vaudTourismeCity('Vallée de Joux'), 'Vallée de Joux', 'Vaud keeps a multi-word destination brand intact');
 
+  // --- Terre&Nature (agenda nature/terroir romand, WP REST + fiche HTML) ---
+  const tnToday = new Date('2026-09-20T12:00:00Z');
+  assert.deepStrictEqual(parseTerreNatureDateRange('Du mardi 22 au dimanche 27 septembre 2026', tnToday),
+    { startDate: '2026-09-22', endDate: '2026-09-27' }, 'Terre&Nature range takes month+year from the end when the start omits them');
+  assert.deepStrictEqual(parseTerreNatureDateRange('Du dimanche 28 juin 2026 au dimanche 10 janvier 2027', tnToday),
+    { startDate: '2026-06-28', endDate: '2027-01-10' }, 'Terre&Nature range keeps both printed years across New Year');
+  assert.deepStrictEqual(parseTerreNatureDateRange('Du 17 septembre 2026 au 25 avril', tnToday),
+    { startDate: '2026-09-17', endDate: '2027-04-25' }, 'Terre&Nature rolls the end year when only the start year is printed');
+  assert.deepStrictEqual(parseTerreNatureDateRange('Samedi 26 septembre 2026', tnToday),
+    { startDate: '2026-09-26', endDate: null }, 'Terre&Nature parses a single dated day');
+  assert.deepStrictEqual(parseTerreNatureDateRange('Les 19 et 20 septembre', tnToday),
+    { startDate: '2026-09-19', endDate: '2026-09-20' }, 'Terre&Nature infers the year on a "Les N et N" two-day range');
+  assert.deepStrictEqual(parseTerreNatureDateRange(''), { startDate: null, endDate: null }, 'Terre&Nature returns no date on an empty line');
+  assert.deepStrictEqual(terreNatureLocation('Saint-Leonard (VS) (VS)'), { city: 'Saint-Leonard', canton: 'VS', nationwide: false }, 'Terre&Nature collapses the CMS-duplicated canton suffix');
+  assert.deepStrictEqual(terreNatureLocation('sainte-croix (VD)'), { city: 'Sainte-Croix', canton: 'VD', nationwide: false }, 'Terre&Nature title-cases an all-lowercase commune');
+  assert.deepStrictEqual(terreNatureLocation('Dans toute la Suisse (VD)'), { city: '', canton: 'VD', nationwide: true }, 'Terre&Nature flags the nationwide pseudo-location');
+  assert.strictEqual(terreNatureWithinScope('Orbe', 'VD').keep, true, 'Terre&Nature keeps a gazetteer commune inside the radius');
+  assert.strictEqual(terreNatureWithinScope('Saignelégier', 'JU').keep, false, 'Terre&Nature drops a gazetteer commune beyond the radius');
+  assert.strictEqual(terreNatureWithinScope('Commune-Inconnue', 'VD').keep, true, 'Terre&Nature keeps an unmapped commune in a neighbouring canton');
+  assert.strictEqual(terreNatureWithinScope('Commune-Inconnue', 'VS').keep, false, 'Terre&Nature drops an unmapped commune in a distant canton');
+  // An amount printed next to "entrée libre (enfants)" is a paid event, not a free one.
+  assert.strictEqual(terreNaturePractical('À voir jusqu’au 1er janvier 2027 au Laténium. Entrée : 12 fr. (adultes), entrée libre (enfants).').priceText,
+    '12 fr. (adultes), entrée libre (enfants).', 'Terre&Nature reads the amount instead of claiming free entry');
+  assert.strictEqual(terreNaturePractical('Jusqu’au 1er novembre, Centre Pro Natura de Champ-Pittet. Entrée libre.').priceText,
+    'Gratuit / entrée libre (à confirmer)', 'Terre&Nature flags a genuinely free entry');
+  assert.strictEqual(terreNaturePractical('Le 21 septembre, de 10h à 15h. Entrée libre.').timeText, '10:00', 'Terre&Nature normalises an hour-only time to HH:MM');
+  assert.strictEqual(terreNaturePractical('De 9h30 à 11h45, sur réservation.\nPrix: 40-60 frs.').timeText, '9:30', 'Terre&Nature keeps the minutes when printed');
+  const tnHtml = '<article>'
+    + '<div><a href="" class="font-medium lg:text-22 flex-1 text-tn-dark-green"> Du vendredi 18  au dimanche 20 septembre 2026 </a></div>'
+    + '<h1>Estavayer 1470 - Grande fête médiévale</h1>'
+    + '<div class="mt-3 xl:text-22">Immersion médiévale au château de Chenaux.</div>'
+    + '<span class="text-14 lg:text-18 font-semibold text-tn-dark-green"> Estavayer-le-Lac (FR) </span>'
+    + '<div class="wysiwyg is-highlighted"><p>Au programme: un marché, des artisans et des visites du donjon.</p>'
+    + '<p>Du 18 au 20 septembre, prix d’entrée à la Fête: 15 fr. (adultes). Spectacle gratuit.</p>'
+    + '<p>Plus de renseignements: <a href="https://estavayer1470.ch">estavayer1470.ch</a> et <a href="https://www.terrenature.ch/abo">notre abo</a></p></div></article>';
+  const tnFields = extractTerreNatureDetailFields(tnHtml);
+  assert.strictEqual(tnFields.dateText, 'Du vendredi 18 au dimanche 20 septembre 2026', 'Terre&Nature reads the date line before the h1');
+  assert.strictEqual(tnFields.locationText, 'Estavayer-le-Lac (FR)', 'Terre&Nature reads the commune line after the h1');
+  assert.deepStrictEqual(tnFields.links, ['https://estavayer1470.ch'], 'Terre&Nature keeps only external organiser links');
+  const tnNear = terreNatureEventFromDetail(tnHtml, { link: 'https://www.terrenature.ch/agenda/estavayer-1470-grande-fete-medievale/', title: { rendered: 'Estavayer 1470 &#8211; Grande fête médiévale' } }, { today: tnToday });
+  assert.ok(tnNear && tnNear.event, 'Terre&Nature emits an event for an in-scope commune');
+  assert.strictEqual(tnNear.event.source, 'terreNature');
+  assert.strictEqual(tnNear.event.startDate, '2026-09-18', 'Terre&Nature leaves a multi-day range at date level (per-day hours are not the range start)');
+  assert.strictEqual(tnNear.event.endDate, '2026-09-20');
+  assert.strictEqual(tnNear.event.city, 'Estavayer-le-Lac');
+  assert.strictEqual(tnNear.event.priceText, '15 fr. (adultes). Spectacle gratuit.', 'Terre&Nature lifts the price from the practical-info paragraph');
+  assert.ok(tnNear.event.officialSources.includes('https://estavayer1470.ch'), 'Terre&Nature carries the organiser link as an official source');
+  assert.ok(/22 km d'Yverdon/.test(tnNear.event.sourceProvenance), 'Terre&Nature annotates the gazetteer distance');
+  const tnFar = terreNatureEventFromDetail(tnHtml.replace('Estavayer-le-Lac (FR)', 'Saint-Maurice (VS)'), { link: 'u' }, { today: tnToday });
+  assert.deepStrictEqual([tnFar.outOfScope, !!tnFar.event], [true, false], 'Terre&Nature drops an out-of-radius commune');
+  const tnSingle = terreNatureEventFromDetail(
+    tnHtml.replace('Du vendredi 18  au dimanche 20 septembre 2026', 'Lundi 21 septembre 2026')
+      .replace('Du 18 au 20 septembre, prix d’entrée à la Fête: 15 fr. (adultes). Spectacle gratuit.', 'Le 21 septembre, de 10h à 15h. Entrée libre.'),
+    { link: 'u' }, { today: tnToday });
+  assert.strictEqual(tnSingle.event.startDate, '2026-09-21T10:00:00+02:00', 'Terre&Nature pins a DST-aware start time on a single-day entry');
+  assert.strictEqual(tnSingle.event.priceText, 'Gratuit / entrée libre (à confirmer)');
+  assert.strictEqual(terreNatureEventFromDetail(tnHtml.replace('Du vendredi 18  au dimanche 20 septembre 2026', 'Prochainement'), { link: 'u' }, { today: tnToday }), null, 'Terre&Nature skips a fiche with no parsable date');
+
   const sunsetJazzHtml = '<div class="c-1"><header><h1>Programmation</h1></header><div class="row">'
     + '<div class="col-md-4"><div class="c-2"><header><h3>Vendredi 10 juillet 2026</h3></header><div class="row"><div class="col-md-12"><div id="accordion2" class="accordion">'
     + '<div class="accordion-item"><h2 class="accordion-header"><button class="accordion-button">Rue de l\'Hôtel de Ville</button></h2><div class="accordion-collapse"><div class="accordion-body"><p><strong>20:00 - 22:30: Julien Lemoine\'s - Lost in Swing</strong></p></div></div></div>'
@@ -9090,4 +9416,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, parseNeuchatelStreetFoodInfo, scrapeNeuchatelStreetFood, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive, vaudTourismeMapIndex, parseVaudEventCards, collapseDateRuns, vaudTourismeCity, vaudTourismeEventsFromGroup, scrapeVaudTourisme };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, parseNeuchatelStreetFoodInfo, scrapeNeuchatelStreetFood, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive, vaudTourismeMapIndex, parseVaudEventCards, collapseDateRuns, vaudTourismeCity, vaudTourismeEventsFromGroup, scrapeVaudTourisme, parseTerreNatureDateRange, terreNatureLocation, terreNatureWithinScope, terreNaturePractical, extractTerreNatureDetailFields, terreNatureEventFromDetail, scrapeTerreNature };
