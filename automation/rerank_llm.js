@@ -29,7 +29,9 @@ function candidateLine(item, i) {
 }
 
 function buildPrompt(candidates, window) {
-  const win = window ? `${window.start} → ${window.endExclusive} (exclu)` : 'ce week-end';
+  const win = window
+    ? `${window.friday ? `vendredi ${window.friday} dès 17h + ` : ''}${window.start} → ${window.endExclusive} (exclu)`
+    : 'ce week-end';
   const list = candidates.map(candidateLine).join('\n');
   return [
     "Tu es le curateur du digest « Activités en famille » pour la famille de Johan (Yverdon, Suisse).",

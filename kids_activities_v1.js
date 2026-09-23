@@ -1056,7 +1056,28 @@ function nextWeekendWindow(now = new Date()) {
   const daysToSat = (6 - day + 7) % 7 || 7;
   const sat = new Date(d); sat.setUTCDate(d.getUTCDate() + daysToSat);
   const mon = new Date(sat); mon.setUTCDate(sat.getUTCDate() + 2);
-  return { start: sat.toISOString().slice(0,10), endExclusive: mon.toISOString().slice(0,10) };
+  const fri = new Date(sat); fri.setUTCDate(sat.getUTCDate() - 1);
+  return { start: sat.toISOString().slice(0,10), endExclusive: mon.toISOString().slice(0,10), friday: fri.toISOString().slice(0,10) };
+}
+
+// Friday-evening extension (2026-09-23, Johan): many fêtes/afterworks (e.g. Last
+// Friday at Sports 5) start Friday evening and were dropped by the Sat–Sun window.
+// An event that starts on the Friday before the window at/after this hour is kept
+// and tagged « vendredi soir ». Date-only Friday entries stay out (could be daytime).
+const FRIDAY_EVENING_FROM_HOUR = 17;
+function windowFriday(window) {
+  if (!window || !window.start) return null;
+  if (window.friday) return window.friday;
+  const sat = new Date(`${window.start}T12:00:00Z`);
+  if (sat.getUTCDay() !== 6) return null;
+  sat.setUTCDate(sat.getUTCDate() - 1);
+  return sat.toISOString().slice(0, 10);
+}
+function isFridayEveningEvent(e, window) {
+  const fri = windowFriday(window);
+  if (!fri || !e || !e.startDate || String(e.startDate).slice(0, 10) !== fri) return false;
+  const m = String(e.startDate).match(/T(\d{2}):/);
+  return !!m && Number(m[1]) >= FRIDAY_EVENING_FROM_HOUR;
 }
 
 function eventId(e) { return `${e.source}-${sha(`${e.url}|${e.startDate || ''}|${e.title}`)}`; }
@@ -3114,7 +3135,7 @@ function rejectionReason(e, window) {
   if (!e.startDate) return 'missing_date';
   const date = e.startDate.slice(0,10);
   const end = (e.endDate || e.startDate).slice(0,10);
-  if (end < window.start || date >= window.endExclusive) return `outside_window_${window.start}_${window.endExclusive}`;
+  if ((end < window.start || date >= window.endExclusive) && !isFridayEveningEvent(e, window)) return `outside_window_${window.start}_${window.endExclusive}`;
   if (!e.locationText && !e.city) return 'missing_location';
   const distance = estimateDistanceKm(e);
   if (distance != null && distance > 60) return `too_far_${distance}km`;
@@ -3362,6 +3383,7 @@ function dateFitDetail(e, window) {
   const start = e.startDate.slice(0,10);
   const end = (e.endDate || e.startDate).slice(0,10);
   const overlaps = end >= window.start && start < window.endExclusive;
+  if (!overlaps && isFridayEveningEvent(e, window)) return { score: 16, reason: 'vendredi soir (dès 17h)' };
   if (!overlaps) return { score: 0, reason: `hors fenêtre ${window.start} → ${window.endExclusive}` };
   const day = new Date(`${start}T12:00:00Z`).getUTCDay();
   const weekendBonus = day === 0 || day === 6 ? 20 : 14;
@@ -3562,7 +3584,7 @@ function tasteSignals(e, window) {
   }
   if (isEvergreenEvent(e, window)) {
     delta += TASTE_CONFIG.evergreenMalus; flags.push('evergreen'); reasons.push('expo permanente/récurrente');
-  } else if (e.startDate && window && String(e.startDate).slice(0, 10) >= window.start) {
+  } else if (e.startDate && window && (String(e.startDate).slice(0, 10) >= window.start || isFridayEveningEvent(e, window))) {
     delta += TASTE_CONFIG.noveltyBonus; flags.push('dated'); reasons.push('événement daté/ponctuel');
   }
   if (/festival|f[êe]te|fete (de|du|des|au|villageoise)|kermesse|benichon|terroir|marche (artisanal|de noel|du terroir|paysan)|open ?air|plein air/.test(hay)
@@ -3718,7 +3740,7 @@ function telegramSummary(scored, window, opts = {}) {
       : ((score.reasons && score.reasons.length) ? score.reasons.join(' · ') : fitReason(e));
     const tasteFlags = (score.taste && score.taste.flags && score.taste.flags.length) ? ` [${score.taste.flags.join(',')}]` : '';
     return `${i+1}. ${e.title}\n` +
-      `📅 ${frDate(e.startDate)}\n` +
+      `📅 ${frDate(e.startDate)}${isFridayEveningEvent(e, window) ? ' · vendredi soir' : ''}\n` +
       `📍 ${e.locationText || e.city}\n` +
       `Pourquoi: ${why}. Score ${score.total}/100 — ${score.label}${tasteFlags}.\n` +
       `À vérifier: ${practicalCaveat(score.caveats && score.caveats.length ? score.caveats : [caveat(e)])}\n` +
@@ -9191,6 +9213,20 @@ async function runFixtureTests() {
     assert(isEvergreenEvent(evergreen('champPittet', 'cp', 96).event, win), 'permanent exhibit (long span, starts before, runs past) is evergreen');
     assert(!isEvergreenEvent(dated('grandsonChateau', 'gc', 94).event, win), 'dated one-off on the target weekend is not evergreen');
     assert(!isEvergreenEvent({ source: 's', startDate: '2026-08-23', endDate: '2026-08-25' }, win), 'a 2-day weekend event is not evergreen even if it spills one day past');
+  {
+    // Friday-evening extension (2026-09-23): Friday ≥17h events join the Sat–Sun window.
+    const w = nextWeekendWindow(new Date('2026-09-23T08:00:00Z'));
+    assert.deepStrictEqual(w, { start: '2026-09-26', endExclusive: '2026-09-28', friday: '2026-09-25' }, 'weekend window carries the preceding Friday');
+    assert.strictEqual(windowFriday({ start: '2026-09-26', endExclusive: '2026-09-28' }), '2026-09-25', '--window without friday derives it from a Saturday start');
+    const base = { source: 'yverdonVille', title: 'Last Friday', url: 'https://example.ch/lf', locationText: 'Sports 5, Yverdon-les-Bains', city: 'Yverdon-les-Bains', description: 'DJ, food trucks, en famille' };
+    const friEve = { ...base, startDate: '2026-09-25T17:00:00+02:00' };
+    assert(isFridayEveningEvent(friEve, w), 'Friday 17h counts as Friday evening');
+    assert.strictEqual(rejectionReason(friEve, w), null, 'Friday-evening event is not rejected as outside window');
+    assert.strictEqual(scoreEvent(friEve, w).details.date.reason, 'vendredi soir (dès 17h)', 'Friday evening gets its own date-fit reason');
+    assert(/^outside_window/.test(rejectionReason({ ...base, startDate: '2026-09-25T14:00:00+02:00' }, w)), 'Friday afternoon stays outside the window');
+    assert(/^outside_window/.test(rejectionReason({ ...base, startDate: '2026-09-25' }, w)), 'date-only Friday stays outside the window');
+    assert(/^outside_window/.test(rejectionReason({ ...base, startDate: '2026-09-24T18:00:00+02:00' }, w)), 'Thursday evening stays outside the window');
+  }
 
     const pool = [
       evergreen('champPittet', 'cp-abeilles', 96),
@@ -9312,7 +9348,7 @@ async function runFixtureTests() {
 async function main() {
   if (process.argv.includes('--fixture-test')) { await runFixtureTests(); return; }
   const windowArg = process.argv.find(a => a.startsWith('--window='));
-  const window = windowArg ? (() => { const [start, endExclusive] = windowArg.split('=')[1].split(':'); return { start, endExclusive }; })() : nextWeekendWindow(new Date());
+  const window = windowArg ? (() => { const [start, endExclusive] = windowArg.split('=')[1].split(':'); const w = { start, endExclusive }; const friday = windowFriday(w); return friday ? { ...w, friday } : w; })() : nextWeekendWindow(new Date());
   const { events, sourceLogs } = await collectAll();
   const normalized = events.filter(e => e && e.id);
   const recommendationPool = canonicalRecommendationPool(normalized);
@@ -9416,4 +9452,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, parseNeuchatelStreetFoodInfo, scrapeNeuchatelStreetFood, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive, vaudTourismeMapIndex, parseVaudEventCards, collapseDateRuns, vaudTourismeCity, vaudTourismeEventsFromGroup, scrapeVaudTourisme, parseTerreNatureDateRange, terreNatureLocation, terreNatureWithinScope, terreNaturePractical, extractTerreNatureDetailFields, terreNatureEventFromDetail, scrapeTerreNature };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, isFridayEveningEvent, windowFriday, nextWeekendWindow, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, parseNeuchatelStreetFoodInfo, scrapeNeuchatelStreetFood, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive, vaudTourismeMapIndex, parseVaudEventCards, collapseDateRuns, vaudTourismeCity, vaudTourismeEventsFromGroup, scrapeVaudTourisme, parseTerreNatureDateRange, terreNatureLocation, terreNatureWithinScope, terreNaturePractical, extractTerreNatureDetailFields, terreNatureEventFromDetail, scrapeTerreNature };

@@ -194,10 +194,18 @@ function labelToVerdict(label) {
   return 'secondary';
 }
 
+// Friday-evening extension (2026-09-23): queue.window.friday marks the Friday
+// before the weekend; events starting that day from 17h are part of the digest.
+function isFridayEvening(iso, window) {
+  if (!iso || !window || !window.friday || iso.slice(0, 10) !== window.friday) return false;
+  const m = iso.match(/T(\d{2}):/);
+  return !!m && Number(m[1]) >= 17;
+}
+
 function inWindow(iso, window) {
   if (!iso || !window) return false;
   const day = iso.slice(0, 10);
-  return day >= window.start && day < window.endExclusive;
+  return (day >= window.start && day < window.endExclusive) || isFridayEvening(iso, window);
 }
 
 function deterministicSummaryLine(event, window) {
@@ -207,7 +215,7 @@ function deterministicSummaryLine(event, window) {
   if (loc) parts.push(loc);
   let line = parts.join(' — ');
   line += inWindow(event.startDate, window)
-    ? ` · ${frDateShort(event.startDate)}`
+    ? ` · ${frDateShort(event.startDate)}${isFridayEvening(event.startDate, window) ? ' (vendredi soir)' : ''}`
     : ` · à l’affiche ce week-end`;
   // Prefer the LLM's concrete "pourquoi" (TASK-231) when present; else fall back to
   // the practical caveats so the family always gets an actionable line.
