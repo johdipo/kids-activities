@@ -28,6 +28,8 @@ Il doit guider le scoring déterministe ET la passe LLM de curation (TASK-231).
 
 ## Format digest
 - **Top 10** (au lieu de top 5) pour que Johan puisse repérer les erreurs de ranking.
+- **Fenêtre = vendredi dès 17h + samedi–dimanche** (2026-09-23, suite à Last Friday manqué) ;
+  les events du vendredi soir sont tagués « vendredi soir ».
 - Johan doit pouvoir **faire un retour** (👍/👎 par event) qui met à jour ce fichier / les poids.
 
 ## Comment donner un retour (boucle de feedback — TASK-231)
