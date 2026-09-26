@@ -59,6 +59,7 @@ obligatoire** : toute erreur/timeout/limite modèle garde l'ordre déterministe 
 Désactivable ponctuellement avec `KA_RERANK=0`. Aucun modèle n'est hardcodé (hérite du défaut OpenClaw).
 
 ## Historique des retours bruts
+- 2026-09-26 (Johan, via feedback CLI) : 👍 «cirque» (+12) — Grand Village / cirque d'Yverdon 26.09: c'était top
 - 2026-09-17 (Johan, via feedback CLI) : 👍 «vendanges» (+12) — grandes fêtes des vendanges = pépites automne famille
 - 2026-09-17 (Johan, via feedback CLI) : 👍 «corso fleuri» (+20) — Fête des Vendanges Neuchâtel: gros événement famille, ne pas classer en 'visite guidée'
 - 2026-09-17 (Johan, via feedback CLI) : 👎 «football» (-12) — sport spectacle (matchs) sans intérêt famille
