@@ -196,7 +196,17 @@ const LOCATION_KM_FROM_YVERDON = {
   'evolène': 130,
   evolene: 130,
   'val d’hérens': 130,
-  'val d\'herens': 130
+  'val d\'herens': 130,
+  // Vignoble / terroir neuchâtelois (neuchatelVinsTerroir, TASK-204 2026-09-27).
+  vaumarcus: 17,
+  boudry: 32,
+  cressier: 45,
+  chaumont: 46,
+  cernier: 47,
+  'le landeron': 50,
+  'chaux-de-fonds': 62,
+  'chaux de fonds': 62,
+  bulle: 75
 };
 const SOURCES = {
   grandson: {
@@ -788,6 +798,30 @@ const SOURCES = {
     detailBatchSize: 3,
     detailPauseMs: 500,
     kind: 'romandie-nature-terroir-curated-agenda-aggregator'
+  },
+  neuchatelVinsTerroir: {
+    // Neuchâtel Vins et Terroir (NVT) — interprofession cantonale vins & terroir
+    // (Cernier). Son agenda est l'AGRÉGATEUR du vignoble neuchâtelois : Caves
+    // Ouvertes neuchâteloises (« de Vaumarcus au Landeron », ~40 domaines), Fête des
+    // Vendanges, Marché du terroir au Mycorama (poney/ateliers enfants, entrée
+    // libre), Grande torrée de Chaumont, dégustations Non Filtré / Œil de Perdrix.
+    // Fit « caves ouvertes / terroir » explicite de Johan, et la rive nord du lac que
+    // `ovv` (vignoble VAUDOIS) ne voit pas. Volume faible (~15 fiches) mais signal fort.
+    // Backend : WordPress 7 + FacetWP. Le CPT `event` est exposé en REST mais SANS
+    // date ni lieu (`acf: []`) → la page `/agenda/` est la source d'autorité : une
+    // seule page (FacetWP `total_pages: 1`, événements à venir uniquement), une carte
+    // `.grid-item` par événement avec ligne de date, `<h4>` titre, corps Gutenberg,
+    // lieu à côté de l'icône `fa-map-marker`, et le lien de fiche
+    // `/evenement/<slug>/` présent dans un <a> COMMENTÉ (la fiche répond bien en 200).
+    // Pas de fetch de fiche nécessaire. robots.txt : `Allow: /`, aucune règle IA.
+    url: 'https://neuchatel-vins-terroir.ch/agenda/',
+    baseUrl: 'https://neuchatel-vins-terroir.ch',
+    // 48 km (et non les 45 de terreNature) : le Littoral + Val-de-Ruz (Cernier,
+    // Chaumont ~46-47 km) tiennent dedans ; Rolle (50), Le Landeron (50), La
+    // Chaux-de-Fonds (62), Bulle (75) en sont exclus. Les Caves Ouvertes, annoncées
+    // « dans tout le canton », sont gardées à part (voir neuchatelVinsTerroirPlace).
+    radiusKm: 48,
+    kind: 'neuchatel-wine-terroir-interprofession-agenda'
   },
   sunsetJazz: {
     // Festival « Sunset Jazz » d'Estavayer-le-Lac (Broye / Lac de Neuchâtel,
@@ -7686,6 +7720,161 @@ async function scrapeTerreNature() {
   };
 }
 
+// --- Neuchâtel Vins et Terroir — agenda du vignoble / terroir neuchâtelois -----
+
+// The card date line uses dashes instead of "du … au …":
+//   "01 janvier 2026 – 31 décembre 2026", "25 – 27 septembre 2026", "03 octobre 2026"
+// Rewritten into the "du X au Y" shape so parseTerreNatureDateRange does the work
+// (year inference, month carried from the end, New-Year roll-over).
+function parseNeuchatelVinsTerroirDate(text, today = new Date()) {
+  const t = clean(decodeHtmlEntities(text || ''));
+  const parts = t.split(/\s+[–—-]\s+/);
+  if (parts.length === 2) return parseTerreNatureDateRange(`du ${parts[0]} au ${parts[1]}`, today);
+  return parseTerreNatureDateRange(t, today);
+}
+
+// Place block = uppercase <span> + optional second line. Observed shapes:
+//   "Adresse Rue Vallier 1 2088 Cressier (NE)", "Petit-Cortaillod 19 · 2016 Cortaillod",
+//   "Mycorama" + "Cernier", "Restaurant La Maison du Prussien à Neuchâtel",
+//   "Espace Gruyère / Bulle", "Montagne de Chaumont", "Chaux de Fonds",
+//   "" + "Dans tout le canton de Neuchâtel", "Dans toute la Suisse".
+function neuchatelVinsTerroirPlace(primary = '', secondary = '', cfg = SOURCES.neuchatelVinsTerroir) {
+  const lines = [primary, secondary].map(s => clean(decodeHtmlEntities(s)).replace(/^adresse\s+/i, '')).filter(Boolean);
+  const label = lines.join(', ');
+  if (/toute la suisse|suisse enti[èe]re/i.test(label)) return { keep: false, nationwide: true, label, city: '', km: null };
+  if (/tout le canton de neuch/i.test(label)) {
+    // Canton-wide operations (Caves Ouvertes neuchâteloises) run along the whole
+    // Littoral, whose near end (Vaumarcus) is ~17 km from Yverdon.
+    return { keep: true, cantonWide: true, label: 'Vignoble neuchâtelois (tout le canton)', city: 'Neuchâtel', km: null };
+  }
+  let city = '';
+  const npa = label.match(/\b\d{4}\s+([^,()·]+?)\s*(?:\([A-Z]{2}\))?\s*$/);
+  if (npa) city = clean(npa[1]);
+  if (!city) {
+    // Try the most specific segment first: second line, then text after "à", "/", "·", ",".
+    const segments = lines.slice().reverse().flatMap(l => l.split(/\s+(?:à|\/|·)\s+|,\s*/).reverse()).map(clean).filter(Boolean);
+    city = segments.find(s => estimateDistanceKm({ city: s }) != null) || segments[0] || '';
+  }
+  const km = estimateDistanceKm({ city, locationText: label });
+  return { keep: km == null || km <= cfg.radiusKm, label, city, km };
+}
+
+// Card body = Gutenberg blocks. Returns text lines and the price summary: an event
+// can be "Entrée libre" while tastings/activities on site are paid, and both matter.
+function neuchatelVinsTerroirPractical(lines = []) {
+  const amount = /(?:\bchf|\bfrs?\.?)\s*\d|\d+(?:[.,]\d{1,2})?\s*(?:\.[–-]|[–-])?\s*(?:chf|frs?\.?)(?=\s|$|[),;])/i;
+  const paid = lines.filter(l => amount.test(l)).map(l => l.replace(/\s+[–-]\s*$/, ''));
+  const free = lines.find(l => /entr[ée]e\s+(?:libre|gratuite)|acc[èe]s\s+libre|\bgratuit(?:e|es|s)?\b/i.test(l) && !amount.test(l));
+  let priceText = '';
+  if (free && paid.length) priceText = `Entrée libre ; payant sur place : ${paid.slice(0, 4).join(' · ')}`;
+  else if (free) priceText = 'Entrée libre';
+  else if (paid.length) priceText = paid.slice(0, 3).join(' · ');
+  const joined = lines.join(' ');
+  // "de 10h à 15h" / "dès 17h" or a programme line starting with a clock time ("09h50 départ…").
+  const cued = joined.match(/\b(?:de|d[èe]s|à)\s+(\d{1,2})\s*h\s*(\d{2})?/i) || (lines.find(l => /^\d{1,2}\s*h\s*\d{2}\b/i.test(l)) || '').match(/^(\d{1,2})\s*h\s*(\d{2})/i);
+  return { priceText, timeText: cued ? `${cued[1]}:${cued[2] || '00'}` : '' };
+}
+
+function extractNeuchatelVinsTerroirCards(html) {
+  // <br> separates price/programme rows inside one paragraph: keep them as lines.
+  const $ = cheerio.load(String(html || '').replace(/<br\s*\/?>/gi, '\n'));
+  const cfg = SOURCES.neuchatelVinsTerroir;
+  return $('.grid-item').map((i, el) => {
+    const $card = $(el);
+    const raw = $.html(el);
+    const $place = $card.find('.fa-map-marker').first().parent().find('p').first();
+    const placePrimary = clean($place.find('span').first().text());
+    const placeSecondary = clean($place.clone().find('span').remove().end().text());
+    const detail = raw.match(/href="(https?:\/\/(?:www\.)?neuchatel-vins-terroir\.ch\/evenement\/[^"]+)"/i);
+    const headings = $card.find('h2, h3').map((j, h) => clean($(h).text())).get();
+    return {
+      dateText: clean($card.find('p.uppercase').first().text()),
+      title: clean(decodeHtmlEntities($card.find('h4').first().text())),
+      subtitle: clean($card.find('p.text-light').first().text()),
+      // Bodies mix classed Gutenberg paragraphs and bare <p>; only the date, subtitle
+      // and place paragraphs are card chrome.
+      lines: $card.find('p, li').not('.uppercase, .text-light, .ml-3').map((j, p) => $(p).text().split('\n')).get().map(clean).filter(Boolean),
+      headings,
+      placePrimary,
+      placeSecondary,
+      url: detail ? canonicalUrl(detail[1], cfg.baseUrl) : '',
+      links: $card.find('a[href]').map((j, a) => clean($(a).attr('href'))).get()
+        .filter(h => /^https?:\/\//i.test(h) && !/neuchatel-vins-terroir\.ch/i.test(h))
+    };
+  }).get().filter(c => c.title);
+}
+
+// Returns { event }, { skipped: 'venue'|'scope'|'nationwide' }, or null when undated.
+function neuchatelVinsTerroirEventFromCard(card, opts = {}) {
+  const cfg = SOURCES.neuchatelVinsTerroir;
+  const { startDate, endDate } = parseNeuchatelVinsTerroirDate(card.dateText, opts.today);
+  if (!card.title || !startDate) return null;
+  // Permanent caveaux ("Horaires d'ouverture", open all season on Fri/Sat evenings)
+  // are venues, not happenings: skip them rather than flood the pool with evergreens.
+  if (card.headings.some(h => /horaires d.ouverture/i.test(h))) return { skipped: 'venue' };
+  const place = neuchatelVinsTerroirPlace(card.placePrimary, card.placeSecondary, cfg);
+  if (place.nationwide) return { skipped: 'nationwide' };
+  if (!place.keep) return { skipped: 'scope', km: place.km, city: place.city };
+  const practical = neuchatelVinsTerroirPractical(card.lines);
+  const url = card.url || `${cfg.url}#${encodeURIComponent(`${card.title}-${startDate}`)}`;
+  const description = clean([card.subtitle, ...card.lines.slice(0, 3)].filter(Boolean).join(' '));
+  const kmText = place.km != null ? `~${place.km} km d'Yverdon` : place.cantonWide ? 'tout le vignoble, dès ~17 km (Vaumarcus)' : 'distance à vérifier';
+  return {
+    event: normalizeEvent({
+      source: 'neuchatelVinsTerroir',
+      // Clock time only on single-day entries: multi-day markets print per-day hours.
+      startDate: endDate ? startDate : isoDateZurich(startDate, practical.timeText),
+      endDate,
+      title: card.title,
+      locationName: place.label,
+      locationText: place.label,
+      city: place.city,
+      url,
+      description,
+      priceText: practical.priceText,
+      // Family cues sit deep in the body ("activités pour petits et grands"), past
+      // what the description keeps, so they are lifted explicitly.
+      ageText: /petits et grands|en famille|pour les enfants|familles?\b/i.test(card.lines.join(' ')) ? 'tout public / famille (petits et grands)' : '',
+      tags: inferTags(`${card.title} ${card.subtitle} ${card.lines.join(' ')} terroir`),
+      sourceProvenance: `Neuchâtel Vins et Terroir — agenda du vignoble neuchâtelois (${place.label || 'lieu à vérifier'}, ${kmText}): ${url}`,
+      officialSources: uniqBy([url, ...card.links].filter(Boolean), x => x),
+      evidence: clean([
+        card.title,
+        card.dateText && `date « ${card.dateText} »`,
+        `${startDate}${endDate ? ` → ${endDate}` : ''}`,
+        place.label && `lieu ${place.label}`,
+        practical.priceText && `tarif ${practical.priceText}`,
+        description
+      ].filter(Boolean).join(' | ')).slice(0, 1200)
+    })
+  };
+}
+
+async function scrapeNeuchatelVinsTerroir() {
+  const cfg = SOURCES.neuchatelVinsTerroir;
+  let html;
+  try {
+    html = await fetchHtml(cfg.url, 30000);
+  } catch (e) {
+    return [{ source: 'neuchatelVinsTerroir', title: 'Neuchâtel Vins et Terroir agenda', url: cfg.url, error: e.message }];
+  }
+  const cards = extractNeuchatelVinsTerroirCards(html);
+  const today = new Date().toISOString().slice(0, 10);
+  const counts = { venue: 0, scope: 0, nationwide: 0, undated: 0 };
+  const events = [];
+  for (const card of cards) {
+    const r = neuchatelVinsTerroirEventFromCard(card);
+    if (!r) { counts.undated++; continue; }
+    if (r.skipped) { counts[r.skipped]++; continue; }
+    events.push(r.event);
+  }
+  const upcoming = events.filter(e => ((e.endDate || e.startDate) || '').slice(0, 10) >= today);
+  return {
+    events: uniqBy(upcoming, e => e.id),
+    note: `${cards.length} cartes, ${counts.venue} caveaux permanents écartés, ${counts.scope} hors rayon ${cfg.radiusKm} km, ${counts.nationwide} nationales, ${counts.undated} sans date, ${upcoming.length} retenues`
+  };
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -7743,7 +7932,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, neuchatelStreetFood: scrapeNeuchatelStreetFood, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy, laMarive: scrapeLaMarive, vaudTourisme: scrapeVaudTourisme, terreNature: scrapeTerreNature });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, neuchatelStreetFood: scrapeNeuchatelStreetFood, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy, laMarive: scrapeLaMarive, vaudTourisme: scrapeVaudTourisme, terreNature: scrapeTerreNature, neuchatelVinsTerroir: scrapeNeuchatelVinsTerroir });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -8728,6 +8917,52 @@ async function runFixtureTests() {
   assert.strictEqual(tnSingle.event.priceText, 'Gratuit / entrée libre (à confirmer)');
   assert.strictEqual(terreNatureEventFromDetail(tnHtml.replace('Du vendredi 18  au dimanche 20 septembre 2026', 'Prochainement'), { link: 'u' }, { today: tnToday }), null, 'Terre&Nature skips a fiche with no parsable date');
 
+  const nvtToday = new Date('2026-09-27T12:00:00Z');
+  assert.deepStrictEqual(parseNeuchatelVinsTerroirDate('01 janvier 2026 – 31 décembre 2026', nvtToday), { startDate: '2026-01-01', endDate: '2026-12-31' }, 'NVT parses a fully dated dash range');
+  assert.deepStrictEqual(parseNeuchatelVinsTerroirDate('24 – 25 octobre 2026', nvtToday), { startDate: '2026-10-24', endDate: '2026-10-25' }, 'NVT carries month+year from the range end');
+  assert.deepStrictEqual(parseNeuchatelVinsTerroirDate('30 décembre – 02 janvier 2027', nvtToday), { startDate: '2026-12-30', endDate: '2027-01-02' }, 'NVT rolls a range across New Year');
+  assert.deepStrictEqual(parseNeuchatelVinsTerroirDate('03 octobre 2026', nvtToday), { startDate: '2026-10-03', endDate: null }, 'NVT parses a single day');
+  assert.deepStrictEqual(parseNeuchatelVinsTerroirDate('Date à confirmer', nvtToday), { startDate: null, endDate: null });
+  assert.strictEqual(neuchatelVinsTerroirPlace('Adresse Rue Vallier 1 2088 Cressier (NE)').city, 'Cressier', 'NVT reads the commune after the NPA and drops the canton');
+  assert.strictEqual(neuchatelVinsTerroirPlace('Restaurant La Maison du Prussien à Neuchâtel').city, 'Neuchâtel', 'NVT reads the commune after « à »');
+  assert.deepStrictEqual([neuchatelVinsTerroirPlace('Mycorama', 'Cernier').city, neuchatelVinsTerroirPlace('Mycorama', 'Cernier').keep], ['Cernier', true], 'NVT uses the second place line and keeps Val-de-Ruz');
+  assert.deepStrictEqual([neuchatelVinsTerroirPlace('Espace Gruyère / Bulle').city, neuchatelVinsTerroirPlace('Espace Gruyère / Bulle').keep], ['Bulle', false], 'NVT drops a far salon');
+  assert.strictEqual(neuchatelVinsTerroirPlace('Route de la Noyère 10 1185 Mont-sur-Rolle').keep, false, 'NVT drops La Côte (Rolle, 50 km)');
+  assert.strictEqual(neuchatelVinsTerroirPlace('', 'Dans tout le canton de Neuchâtel').cantonWide, true, 'NVT keeps canton-wide Caves Ouvertes');
+  assert.strictEqual(neuchatelVinsTerroirPlace('Dans toute la Suisse').nationwide, true);
+  assert.strictEqual(neuchatelVinsTerroirPractical(['Tout est compris dans le tarif.']).priceText, '', 'NVT does not invent a price');
+  assert.strictEqual(neuchatelVinsTerroirPractical(['Entrée : 12 fr. adultes, gratuit pour les enfants']).priceText, 'Entrée : 12 fr. adultes, gratuit pour les enfants', 'NVT never calls a line with an amount free');
+  const nvtCard = (date, title, body, place, second = '', slug = 'x') => '<div class="grid-item lg:w-1/3 p-4"><div class="border"><div class="p-3 bg-gray-100">'
+    + `<p class="mt-3 uppercase text-primary text-xl font-bold">${date}</p><h4 class="text-3xl">${title}</h4><p class="text-light mb-2"></p><p>${body}</p>`
+    + `<div class="mt-3 text-primary text-sm flex items-center"><i class="fad fa-map-marker"></i><p class="ml-3 text-primary text-sm mb-0 "><span class="uppercase">${place}</span><br>${second}</p></div>`
+    + `<!-- <a class="absolute" href="https://neuchatel-vins-terroir.ch/evenement/${slug}/"></a> --></div></div></div>`;
+  const nvtHtml = '<div class="grid--masonry"><!--fwp-loop-->'
+    + nvtCard('05 juin 2026 – 31 octobre 2026', 'Caveau de dégustation des vins de Boudry', '<p class="wp-block-paragraph">Terrasse panoramique.</p><h2 class="wp-block-heading">Horaires d&rsquo;ouverture</h2><ul><li>Vendredi : 17h00 à 20h30</li></ul>', 'Ruelle du Château · 2017 Boudry', '', 'caveau-boudry')
+    + nvtCard('24 – 25 octobre 2026', 'Marché du terroir', '<p class="wp-block-paragraph">Au programme : plusieurs activités pour petits et grands.</p><p class="wp-block-paragraph">Dégustation des vins : CHF 10.–<br>Balade à poney : CHF 5.– – dimanche de 11h à 15h</p><p class="wp-block-paragraph"><strong>Entrée libre – Venez partager un week-end gourmand !</strong></p><div class="wp-block-button"><a href="https://mycorama.ch/">Plus d&rsquo;informations</a></div>', 'Mycorama ', 'Cernier ', 'marche-du-terroir')
+    + nvtCard('03 octobre 2026', 'Journée découverte au Pays des Fées', '<p>Déroulement de la journée</p><p>09h50 départ de Neuchâtel à bord du train Nostalgie<br />10h52 arrivée à la Presta</p>', 'Neuchâtel', 'Place de la gare 1', 'journee-decouverte-au-pays-des-fees-4')
+    + nvtCard('02 – 06 décembre 2026', 'Salon Goûts et Terroirs', '<p>Salon à Bulle.</p>', 'Espace Gruyère / Bulle', '', 'salon')
+    + nvtCard('23 – 24 avril 2027', 'Caves Ouvertes neuchâteloises 2027', '<p class="wp-block-paragraph">De Vaumarcus au Landeron, une quarantaine de domaines.</p>', '', 'Dans tout le canton de Neuchâtel ', 'caves-ouvertes-neuchateloises-2027')
+    + nvtCard('Prochainement', 'Sans date', '<p>?</p>', 'Neuchâtel')
+    + '</div>';
+  const nvtCards = extractNeuchatelVinsTerroirCards(nvtHtml);
+  assert.strictEqual(nvtCards.length, 6, 'NVT reads every agenda card');
+  assert.strictEqual(nvtCards[1].url, 'https://neuchatel-vins-terroir.ch/evenement/marche-du-terroir/', 'NVT recovers the fiche URL from the commented-out card link');
+  assert.deepStrictEqual(nvtCards[1].links, ['https://mycorama.ch/'], 'NVT keeps only external organiser links');
+  assert.deepStrictEqual([nvtCards[1].placePrimary, nvtCards[1].placeSecondary], ['Mycorama', 'Cernier']);
+  const nvtResults = nvtCards.map(c => neuchatelVinsTerroirEventFromCard(c, { today: nvtToday }));
+  assert.deepStrictEqual(nvtResults[0], { skipped: 'venue' }, 'NVT skips permanent caveau opening hours');
+  const nvtMarket = nvtResults[1].event;
+  assert.strictEqual(nvtMarket.source, 'neuchatelVinsTerroir');
+  assert.deepStrictEqual([nvtMarket.startDate, nvtMarket.endDate, nvtMarket.city], ['2026-10-24', '2026-10-25', 'Cernier'], 'NVT leaves a multi-day market at date level');
+  assert.strictEqual(nvtMarket.priceText, 'Entrée libre ; payant sur place : Dégustation des vins : CHF 10.– · Balade à poney : CHF 5.– – dimanche de 11h à 15h', 'NVT reports free entry and the paid on-site activities split on <br>');
+  assert.strictEqual(nvtMarket.ageText, 'tout public / famille (petits et grands)', 'NVT lifts the « petits et grands » family cue');
+  assert.ok(/~47 km d'Yverdon/.test(nvtMarket.sourceProvenance), 'NVT annotates the gazetteer distance');
+  assert.strictEqual(nvtResults[2].event.startDate, '2026-10-03T09:50:00+02:00', 'NVT pins a single-day start from a programme line');
+  assert.strictEqual(nvtResults[2].event.locationText, 'Neuchâtel, Place de la gare 1');
+  assert.strictEqual(nvtResults[3].skipped, 'scope', 'NVT drops an out-of-radius salon');
+  assert.deepStrictEqual([nvtResults[4].event.startDate, nvtResults[4].event.locationText], ['2027-04-23', 'Vignoble neuchâtelois (tout le canton)'], 'NVT keeps canton-wide Caves Ouvertes');
+  assert.strictEqual(nvtResults[5], null, 'NVT skips an undated card');
+
   const sunsetJazzHtml = '<div class="c-1"><header><h1>Programmation</h1></header><div class="row">'
     + '<div class="col-md-4"><div class="c-2"><header><h3>Vendredi 10 juillet 2026</h3></header><div class="row"><div class="col-md-12"><div id="accordion2" class="accordion">'
     + '<div class="accordion-item"><h2 class="accordion-header"><button class="accordion-button">Rue de l\'Hôtel de Ville</button></h2><div class="accordion-collapse"><div class="accordion-body"><p><strong>20:00 - 22:30: Julien Lemoine\'s - Lost in Swing</strong></p></div></div></div>'
@@ -9452,4 +9687,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, isFridayEveningEvent, windowFriday, nextWeekendWindow, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, parseNeuchatelStreetFoodInfo, scrapeNeuchatelStreetFood, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive, vaudTourismeMapIndex, parseVaudEventCards, collapseDateRuns, vaudTourismeCity, vaudTourismeEventsFromGroup, scrapeVaudTourisme, parseTerreNatureDateRange, terreNatureLocation, terreNatureWithinScope, terreNaturePractical, extractTerreNatureDetailFields, terreNatureEventFromDetail, scrapeTerreNature };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, isFridayEveningEvent, windowFriday, nextWeekendWindow, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, parseOvvListingDate, parseOvvTime, ovvCityFromAddress, extractOvvListings, parseOvvDetail, scrapeOvv, parseBuskersEditions, scrapeBuskers, parseNeuchatelStreetFoodInfo, scrapeNeuchatelStreetFood, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive, vaudTourismeMapIndex, parseVaudEventCards, collapseDateRuns, vaudTourismeCity, vaudTourismeEventsFromGroup, scrapeVaudTourisme, parseTerreNatureDateRange, terreNatureLocation, terreNatureWithinScope, terreNaturePractical, extractTerreNatureDetailFields, terreNatureEventFromDetail, scrapeTerreNature, parseNeuchatelVinsTerroirDate, neuchatelVinsTerroirPlace, neuchatelVinsTerroirPractical, extractNeuchatelVinsTerroirCards, neuchatelVinsTerroirEventFromCard, scrapeNeuchatelVinsTerroir };
