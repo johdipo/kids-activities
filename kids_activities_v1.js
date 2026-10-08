@@ -3594,6 +3594,8 @@ function isEvergreenEvent(e, window) {
 // file that the next run reads back. All of it is deterministic and side-effect-free
 // on scoring correctness — the LLM re-rank (automation/rerank_llm.js) is a separate,
 // fallback-safe layer on top.
+const RERANK_POOL_SIZE = 40;
+
 const TASTE_CONFIG = {
   artMalus: -18,          // art without a clear child/family angle
   genericWalkMalus: -12,  // "balade / visite guidée / découverte de <ville>" sans accroche
@@ -9733,6 +9735,8 @@ async function main() {
   scored.sort((a, b) => b.score.total - a.score.total);
   console.log(`Taste curation: applied to ${scored.length} events; feedback rules=${feedback.rules.length}; anti-repetition excludes=${excludeSignatures.size}`);
 
+  // Pool is wide on purpose: the deterministic scorer saturates at 100 on noisy tags,
+  // so a narrow cut drops real gems (fêtes, ateliers) before the LLM ever sees them.
   // TASK-231 LLM re-rank of the curated shortlist pool. Bounded (~18 events), and
   // fully fallback-safe: any error/timeout/parse failure keeps the deterministic
   // order so the digest never regresses. Skipped with KA_RERANK=0.
@@ -9741,7 +9745,7 @@ async function main() {
       const { rerankShortlist } = require('./automation/rerank_llm.js');
       const pool = scored
         .filter(x => x.score.total >= 60 && !excludeSignatures.has(eventSignature(x.event)))
-        .slice(0, 18);
+        .slice(0, RERANK_POOL_SIZE);
       const rr = await rerankShortlist(pool, window, {});
       if (rr && Array.isArray(rr.ranking) && rr.ranking.length) {
         const byId = new Map(pool.map(x => [x.event.id, x]));

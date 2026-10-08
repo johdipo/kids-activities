@@ -28,6 +28,13 @@ function candidateLine(item, i) {
   return `${i + 1}. id=${e.id} | ${e.title} | ${date} | ${loc} | source=${e.source} | score=${s.total}${taste} | tags=${tags}`;
 }
 
+function ageOn(birth, now = new Date()) {
+  const b = new Date(birth);
+  let a = now.getFullYear() - b.getFullYear();
+  if (now < new Date(now.getFullYear(), b.getMonth(), b.getDate())) a -= 1;
+  return a;
+}
+
 function buildPrompt(candidates, window) {
   const win = window
     ? `${window.friday ? `vendredi ${window.friday} dès 17h + ` : ''}${window.start} → ${window.endExclusive} (exclu)`
@@ -35,7 +42,7 @@ function buildPrompt(candidates, window) {
   const list = candidates.map(candidateLine).join('\n');
   return [
     "Tu es le curateur du digest « Activités en famille » pour la famille de Johan (Yverdon, Suisse).",
-    "Famille : Andy (6 ans, intello, sciences, ateliers), Lennon (4 ans, animaux, nature, exploration), Johan & Daisy.",
+    `Famille : Andy (${ageOn('2019-07-01')} ans, intello, sciences, ateliers), Lennon (${ageOn('2021-11-03')} ans, animaux, nature, exploration), Johan & Daisy.`,
     "",
     "Règles de goût (source : TASTE-FEEDBACK.md) — applique-les strictement :",
     "- Priorité forte aux NOUVEAUTÉS et événements PONCTUELS datés ce week-end ; malus aux expos permanentes/récurrentes.",
