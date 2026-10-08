@@ -20,6 +20,7 @@ const path = require('path');
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || '/home/isaak/.npm-global/bin/openclaw';
 const DEFAULT_TIMEOUT_MS = Number(process.env.KA_RERANK_TIMEOUT_MS || 150000);
 
+const DESC_MAX = Number(process.env.KA_RERANK_DESC_CHARS || 220);
 // Compact projection so the prompt stays cheap regardless of description length.
 function candidateLine(item, i) {
   const e = item.event;
@@ -28,7 +29,13 @@ function candidateLine(item, i) {
   const taste = (s.taste && s.taste.flags && s.taste.flags.length) ? ` flags=${s.taste.flags.join(',')}` : '';
   const date = (e.startDate || '').slice(0, 10) || 'date?';
   const loc = (e.locationText || e.city || '').split(',')[0];
-  return `${i + 1}. id=${e.id} | ${e.title} | ${date} | ${loc} | source=${e.source} | score=${s.total}${taste} | tags=${tags}`;
+  const time = (String(e.startDate || '').match(/T(\d{2}:\d{2})/) || [])[1];
+  const when = time && time !== '00:00' ? `${date} ${time}` : date;
+  const meta = [e.ageText ? `âge=${e.ageText}` : '', e.priceText ? `prix=${String(e.priceText).slice(0, 40)}` : ''].filter(Boolean).join(' | ');
+  // Short summary (TASK-231 follow-up): lets the model judge real content, not just the title.
+  const desc = String(e.description || '').replace(/\s+/g, ' ').trim().slice(0, DESC_MAX);
+  const head = `${i + 1}. id=${e.id} | ${e.title} | ${when} | ${loc} | source=${e.source} | score=${s.total}${taste} | tags=${tags}${meta ? ' | ' + meta : ''}`;
+  return desc ? `${head}\n   résumé: ${desc}` : head;
 }
 
 function ageOn(birth, now = new Date()) {
@@ -58,6 +65,7 @@ function buildPrompt(candidates, window) {
     `Fenêtre cible : ${win}. Voici les ${candidates.length} candidats pré-filtrés (déjà valides âge/date/distance) :`,
     list,
     "",
+    "Appuie-toi sur le « résumé » quand il existe : le titre seul peut tromper (ex. un tournoi n'est pas une journée nature). Si une inscription est requise ou l'horaire est très matinal, mentionne-le dans le pourquoi.",
     "Classe-les du PLUS au MOINS pertinent pour une vraie sortie famille ce week-end.",
     "Pour chacun donne un « pourquoi » court (max ~14 mots, en français, concret, pas de remplissage).",
     "Réponds UNIQUEMENT avec un tableau JSON valide, sans texte autour, de la forme :",
