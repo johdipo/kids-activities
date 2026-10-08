@@ -4,7 +4,7 @@
  *
  * The deterministic scorer filters age/date/distance well but can't judge real
  * family appeal. This module asks the configured model (no hardcoded model — it
- * inherits the OpenClaw default via `openclaw capability model run`) to re-rank a
+ * uses the `sonnet` alias (KA_RERANK_MODEL_ALIAS), falling back to the OpenClaw default) to re-rank a
  * SMALL, already-filtered candidate pool (~15-20 events, not the full 1800) by
  * genuine appeal for Johan's family, applying the taste rules in TASTE-FEEDBACK.md.
  *
@@ -13,6 +13,9 @@
  * deterministic order. It never throws and never blocks the digest.
  */
 const { execFile } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || '/home/isaak/.npm-global/bin/openclaw';
 const DEFAULT_TIMEOUT_MS = Number(process.env.KA_RERANK_TIMEOUT_MS || 150000);
@@ -42,7 +45,7 @@ function buildPrompt(candidates, window) {
   const list = candidates.map(candidateLine).join('\n');
   return [
     "Tu es le curateur du digest « Activités en famille » pour la famille de Johan (Yverdon, Suisse).",
-    `Famille : Andy (${ageOn('2019-07-01')} ans, intello, sciences, ateliers), Lennon (${ageOn('2021-11-03')} ans, animaux, nature, exploration), Johan & Daisy.`,
+    `Famille avec deux filles : Andy (${ageOn('2019-07-01')} ans, intello, sciences, ateliers), Lennon (${ageOn('2021-11-03')} ans, animaux, nature, exploration), Johan & Daisy.`,
     "",
     "Règles de goût (source : TASTE-FEEDBACK.md) — applique-les strictement :",
     "- Priorité forte aux NOUVEAUTÉS et événements PONCTUELS datés ce week-end ; malus aux expos permanentes/récurrentes.",
@@ -63,9 +66,26 @@ function buildPrompt(candidates, window) {
   ].join('\n');
 }
 
+// Model chosen by ALIAS (never a hardcoded id): the alias is resolved against
+// agents.defaults.models in openclaw.json at run time, so it follows whatever model
+// the alias points to. Unknown alias / unreadable config → OpenClaw default model.
+const MODEL_ALIAS = process.env.KA_RERANK_MODEL_ALIAS || 'sonnet';
+const OPENCLAW_CONFIG = process.env.OPENCLAW_CONFIG_PATH || path.join(os.homedir(), '.openclaw', 'openclaw.json');
+
+function resolveModelAlias(alias = MODEL_ALIAS, configFile = OPENCLAW_CONFIG) {
+  if (!alias) return null;
+  try {
+    const models = JSON.parse(fs.readFileSync(configFile, 'utf8')).agents.defaults.models || {};
+    const hit = Object.entries(models).find(([, v]) => v && v.alias === alias);
+    return hit ? hit[0] : null;
+  } catch { return null; }
+}
+
 function runModelCli(prompt, opts = {}) {
   return new Promise((resolve, reject) => {
     const args = ['capability', 'model', 'run', '--json', '--prompt', prompt];
+    const model = opts.model !== undefined ? opts.model : resolveModelAlias();
+    if (model) args.push('--model', model);
     execFile(OPENCLAW_BIN, args, { timeout: opts.timeoutMs || DEFAULT_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
       (err, stdout) => {
         if (err) return reject(new Error(`model run failed: ${err.message}`));
@@ -121,4 +141,4 @@ async function rerankShortlist(candidates, window, opts = {}) {
   }
 }
 
-module.exports = { rerankShortlist, buildPrompt, extractJsonBlock, parseModelOutput, candidateLine };
+module.exports = { resolveModelAlias, rerankShortlist, buildPrompt, extractJsonBlock, parseModelOutput, candidateLine };
