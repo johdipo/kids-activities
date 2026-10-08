@@ -3598,6 +3598,8 @@ const TASTE_CONFIG = {
   artMalus: -18,          // art without a clear child/family angle
   genericWalkMalus: -12,  // "balade / visite guidée / découverte de <ville>" sans accroche
   civicMalus: -45,        // conseils, votations, administratif → effectively excluded
+  religiousMalus: -30,    // visites de temple/église, cultes, projections confessionnelles (sauf festif/culturel)
+  seniorMalus: -45,       // Pro Senectute, aînés, seniors → hors cible famille
   evergreenMalus: -12,    // permanent/recurring exhibit
   noveltyBonus: 8,        // dated one-off happening in the target window
   positiveBonus: 8,       // festivals, fêtes, terroir, plein-air, nature/animaux/science
@@ -3634,6 +3636,14 @@ function tasteSignals(e, window) {
 
   if (/conseil (communal|general|municipal|de ville)|votation|assemblee (communale|generale|bourgeoisiale|de commune)|seance du conseil|\belections?\b|scrutin|budget communal|preavis municipal|legislatif communal/.test(hay)) {
     delta += TASTE_CONFIG.civicMalus; flags.push('civic'); reasons.push('civique/administratif');
+  }
+  // Johan 2026-10-08: « on n'apprécie pas les activités religieuses, sauf si festives ou culturelles ».
+  const festiveHook = /festival|f[êe]te|fete|kermesse|benichon|marche|noel|saint[- ]nicolas|carnaval|spectacle|atelier|nocturne|lumieres/.test(hay);
+  if (!festiveHook && /\btemple\b|\beglise\b|\bchapelle\b|cathedrale|\bculte\b|\bmesse\b|paroiss|celebration|oecumeni|\bpriere|recueillement|evangeli|\bbible|catechis|louange|\bthe chosen\b/.test(hay)) {
+    delta += TASTE_CONFIG.religiousMalus; flags.push('religious'); reasons.push('religieux (non festif)');
+  }
+  if (/pro senectute|\bseniors?\b|\baine(e)?s\b|troisieme age|\b(60|65)\s?\+/.test(hay)) {
+    delta += TASTE_CONFIG.seniorMalus; flags.push('seniors'); reasons.push('public seniors');
   }
   if (!childCentric && /vernissage|exposition d[ '’]?art|expo d[ '’]?art|galerie d[ '’]?art|\bpeinture\b|\bsculpture\b|arts? plastiques|aquarelle|art contemporain|finissage/.test(hay)) {
     delta += TASTE_CONFIG.artMalus; flags.push('art'); reasons.push('art (peu apprécié)');
@@ -9622,6 +9632,12 @@ async function runFixtureTests() {
     assert(civic.flags.includes('civic') && civic.delta <= -30, `civic should be near-excluded, got ${civic.delta}`);
     const art = tasteSignals(normalizeEvent({ source: 's', title: 'Vernissage — exposition de peinture et sculpture', startDate: '2026-08-23' }), win);
     assert(art.flags.includes('art'), 'art event should carry the art flag');
+    const temple = tasteSignals(normalizeEvent({ source: 's', title: 'Visite du Temple', startDate: '2026-08-23' }), win);
+    assert(temple.flags.includes('religious') && temple.delta <= -10, `religious visit should be penalised, got ${temple.delta}`);
+    const noel = tasteSignals(normalizeEvent({ source: 's', title: 'Marché de Noël devant l\'église', startDate: '2026-08-23' }), win);
+    assert(!noel.flags.includes('religious'), 'festive event at a church is not penalised as religious');
+    const senior = tasteSignals(normalizeEvent({ source: 's', title: 'Après-midi découverte sportive Pro Senectute', startDate: '2026-08-23' }), win);
+    assert(senior.flags.includes('seniors') && senior.delta <= -30, `seniors event should be near-excluded, got ${senior.delta}`);
     const walk = tasteSignals(normalizeEvent({ source: 's', title: 'Balades découverte de Môtiers', startDate: '2026-08-23' }), win);
     assert(walk.flags.includes('generic-walk'), 'generic walk should carry the generic-walk flag');
     const festival = tasteSignals(normalizeEvent({ source: 's', title: 'Fête de la préhistoire — atelier enfants', startDate: '2026-08-23' }), win);
