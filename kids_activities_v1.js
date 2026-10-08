@@ -6951,8 +6951,8 @@ function parseMuseeYverdonDetail(html) {
   return { lieu, prix, description };
 }
 
-function museeYverdonEventsFromListing(l, detail = {}) {
-  const { occurrences, startTime, endTime } = parseMuseeYverdonDate(l.dateText);
+function museeYverdonEventsFromListing(l, detail = {}, now = new Date()) {
+  const { occurrences, startTime, endTime } = parseMuseeYverdonDate(l.dateText, now);
   if (!occurrences.length) return [];
   const lieu = clean(detail.lieu || '');
   const venue = lieu || 'Château d’Yverdon-les-Bains';
@@ -8785,7 +8785,7 @@ async function runFixtureTests() {
   assert.strictEqual(myDetail.lieu, 'Château d\'Yverdon-les-Bains', 'Musée d’Yverdon should read the Lieu meta');
   assert.strictEqual(myDetail.prix, 'Entrée libre', 'Musée d’Yverdon should read the Prix meta');
   assert.ok(/Voyage, voyage/.test(myDetail.description) && !/Partage/.test(myDetail.description), 'Musée d’Yverdon should read the body and drop the share widget text');
-  const myEvents = museeYverdonEventsFromListing(myListings[0], myDetail);
+  const myEvents = museeYverdonEventsFromListing(myListings[0], myDetail, myNow);
   assert.strictEqual(myEvents.length, 1, 'Musée d’Yverdon single card -> single event');
   assert.strictEqual(myEvents[0].source, 'museeYverdon');
   assert.strictEqual(myEvents[0].startDate, '2026-10-04T10:00:00+02:00', 'Musée d’Yverdon should apply the DST-aware start time');
