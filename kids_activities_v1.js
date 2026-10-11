@@ -1559,9 +1559,37 @@ function parseEmoiEvent(feature) {
   });
 }
 
+// Geocity detail records are fetched in parallel batches. The old sequential loop
+// (97 ids x ~0.7s + a 301 hop on the listing URL) sat at ~70s idle and went past
+// the 90s per-source guard under concurrent load, so `emoi` returned 0 events on
+// every run since mid-September (TASK-204 2026-10-11). `deadlineMs` makes the
+// extractor return what it has instead of being cut by the guard and losing all.
+async function fetchGeocityDetails(ids, { apiUrl, concurrency = 8, deadlineMs = 70000, timeoutMs = 20000, build, onError }) {
+  const started = Date.now();
+  const out = [];
+  const skipped = [];
+  for (let i = 0; i < ids.length; i += concurrency) {
+    if (Date.now() - started > deadlineMs) { skipped.push(...ids.slice(i)); break; }
+    const batch = ids.slice(i, i + concurrency);
+    const results = await Promise.all(batch.map(async id => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const detail = await fetchEmoiJson(`${apiUrl}/${id}`, timeoutMs);
+          return build(detail?.properties || detail || {}, id);
+        } catch (e) {
+          if (attempt === 1) return onError ? onError(id, e) : { error: e.message };
+        }
+      }
+    }));
+    out.push(...results);
+  }
+  return { events: out.filter(e => e && !e.error), skipped };
+}
+
 async function scrapeEmoi() {
   const ids = [];
-  let nextUrl = `${SOURCES.emoi.apiUrl}?domain=${SOURCES.emoi.domain}&page=1&page_size=50`;
+  // Trailing slash: `/rest/agenda?...` answers 301 -> `/rest/agenda/?...`.
+  let nextUrl = `${SOURCES.emoi.apiUrl}/?domain=${SOURCES.emoi.domain}&page=1&page_size=50`;
   for (let page = 0; nextUrl && page < 10; page++) {
     const payload = await fetchEmoiJson(nextUrl, 30000);
     for (const feature of payload.features || []) {
@@ -1570,16 +1598,12 @@ async function scrapeEmoi() {
     }
     nextUrl = payload.next || '';
   }
-  const events = [];
-  for (const id of [...new Set(ids)]) {
-    try {
-      const detail = await fetchEmoiJson(`${SOURCES.emoi.apiUrl}/${id}`, 25000);
-      events.push(parseEmoiEvent(detail));
-    } catch (e) {
-      events.push({ source: 'emoi', title: `EMOI event ${id}`, url: emoiEventUrl(id), error: e.message });
-    }
-  }
-  return events.filter(e => !e.error);
+  const { events, skipped } = await fetchGeocityDetails([...new Set(ids)], {
+    apiUrl: SOURCES.emoi.apiUrl,
+    build: raw => parseEmoiEvent({ properties: raw })
+  });
+  if (skipped.length) console.warn(`emoi: deadline reached, ${skipped.length} detail records skipped`);
+  return events;
 }
 
 function yverdonVilleEventUrl(id, themePage) {
@@ -8127,6 +8151,29 @@ async function runFixtureTests() {
   const emoiEvent = parseEmoiEvent({ properties: { id: 30501, title: 'Sur les traces du trésor du Duc, parcours libre et concours', starts_at: '2026-06-01T00:00:00+02:00', ends_at: '2026-06-30T23:59:00+02:00', location_details: 'Grandson, 1422', summary: 'Parcours libre en famille dans le bourg.', pricing: 'Offert par la Commune', publics: ['Tous publics'], genre_evenement: ['Evénement'], website: 'https://www.grandson.ch/agenda/grandson-morat-2026-parcours-libre-concours/' } });
   assert.strictEqual(emoiEvent.source, 'emoi');
   assert.strictEqual(emoiEvent.city, 'Grandson');
+  {
+    // Geocity detail fetch: parallel batches, one retry, deadline returns partial results.
+    const realFetch = global.fetch;
+    const calls = { n: 0, inflight: 0, maxInflight: 0 };
+    global.fetch = async (url) => {
+      calls.n++; calls.inflight++; calls.maxInflight = Math.max(calls.maxInflight, calls.inflight);
+      await new Promise(r => setTimeout(r, 20));
+      calls.inflight--;
+      const id = Number(String(url).split('/').pop());
+      if (id === 3 && calls.n < 20 && !global.__geoRetried) { global.__geoRetried = true; return { ok: false, status: 502 }; }
+      if (id === 4) return { ok: false, status: 500 };
+      return { ok: true, json: async () => ({ properties: { id, title: `Evt ${id}`, starts_at: '2026-11-01T10:00:00+01:00', location_details: 'Yverdon-les-Bains' } }) };
+    };
+    try {
+      const res = await fetchGeocityDetails([1, 2, 3, 4, 5, 6], { apiUrl: 'https://x/rest/agenda', concurrency: 3, build: raw => parseEmoiEvent({ properties: raw }) });
+      assert.deepStrictEqual(res.events.map(e => e.title).sort(), ['Evt 1', 'Evt 2', 'Evt 3', 'Evt 5', 'Evt 6']);
+      assert(calls.maxInflight > 1 && calls.maxInflight <= 3, 'detail fetches run in bounded parallel batches');
+      assert.strictEqual(res.skipped.length, 0);
+      const late = await fetchGeocityDetails([7, 8, 9, 10], { apiUrl: 'https://x/rest/agenda', concurrency: 2, deadlineMs: -1, build: raw => parseEmoiEvent({ properties: raw }) });
+      assert.strictEqual(late.events.length, 0);
+      assert.deepStrictEqual(late.skipped, [7, 8, 9, 10]);
+    } finally { global.fetch = realFetch; delete global.__geoRetried; }
+  }
   assert(/tout public|famille/i.test(emoiEvent.ageText));
 
   const tempsLibreListings = extractTempsLibreListings('<a class="container-link" href="/vaud/manifestations/449853-dans-la-peau-des-mangakas" title="Dans la peau des mangakas"><article><div class="exergue date"><div class="dark"><span class="day">14</span><span class="month-year">juin 2026</span></div></div><p class="categories"><strong>Ateliers</strong></p><h3>Dans la peau des mangakas</h3><p class="teaser">Atelier créatif manga</p><p class="place"><strong>Musée romain de Lausanne-Vidy</strong>, Lausanne</p><ul class="tagInfos"><li class="free">Gratuit</li></ul></article></a>', SOURCES.tempsLibre.url);
