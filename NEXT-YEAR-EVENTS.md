@@ -1,0 +1,2 @@
+# Événements à surveiller (années suivantes)
+- Festival science et technique pour enfants, Val-de-Travers (NE). Source: https://www.arcinfo.ch/neuchatel-canton/val-de-travers-region/val-de-travers-commune/un-festival-pour-faire-decouvrir-la-science-et-la-technique-aux-enfants-1517868 (article payant, nom/dates à confirmer). Ajouté par Johan le 2026-10-15, à surveiller pour 2027 (pile Andy).\n
