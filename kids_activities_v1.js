@@ -832,6 +832,26 @@ const SOURCES = {
     radiusKm: 48,
     kind: 'neuchatel-wine-terroir-interprofession-agenda'
   },
+  lanterneMagique: {
+    // La Lanterne Magique (club d'Yverdon, enfants 6-12 ans) + La Petite Lanterne (4-6 ans) —
+    // ciné-clubs pour enfants au Cinéma Bel-Air (Place Bel-Air 6, Yverdon, ~0 km). DEMANDE
+    // EXPLICITE de Johan (2026-10-28) : fit très fort pour Lennon (4 ans) et Andy. Deux sites
+    // WordPress statiques, aucune API : (1) `lanterne-magique.org/clubs/yverdon-les-bains/`
+    // porte l'horaire du club (« mercredi : 13:30/15:30 »), la liste COMPLÈTE des 8 séances
+    // de la saison (`li.liste_dates`, une icône `audio-description` par séance adaptée), le
+    // film de la PROCHAINE séance seulement (`Prochaine séance` → titre + date) et le tarif
+    // (abonnement CHF 40.– les 8 séances) ; (2) `petitelanterne.org/cinemas/yverdon-les-bains/`
+    // liste les « prochaines projections » (`article.seance-*` : `<date>` jour/mois/année HH:MM,
+    // `<h3>Séance <thème></h3>`, sous-titre, lien billetterie) + tarifs CHF 10.–/5.– et portes
+    // 10h30. Une occurrence par date. DISTINCT des agendas touristiques (aucun ne relaie le
+    // ciné-club) ; la dédup URL/clé de recommandation en aval absorbe tout recouvrement avec
+    // `leProgrammeVaudKids`. Les séances Lanterne Magique non annoncées n'ont pas de film :
+    // titre générique (le film n'est publié qu'à l'approche de la séance).
+    url: 'https://www.lanterne-magique.org/clubs/yverdon-les-bains/',
+    petiteUrl: 'https://www.petitelanterne.org/cinemas/yverdon-les-bains/',
+    baseUrl: 'https://www.lanterne-magique.org',
+    kind: 'cinema-kids-club-lanterne-magique-yverdon'
+  },
   sunsetJazz: {
     // Festival « Sunset Jazz » d'Estavayer-le-Lac (Broye / Lac de Neuchâtel,
     // ~22 km d'Yverdon) : jazz de rue estival dans le Bourg médiéval, organisé
@@ -8024,6 +8044,184 @@ async function scrapeNeuchatelVinsTerroir() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// La Lanterne Magique (6-12 ans) + La Petite Lanterne (4-6 ans) — ciné-clubs Bel-Air, Yverdon
+// ---------------------------------------------------------------------------
+const LANTERNE_VENUE = 'Cinéma Bel-Air';
+const LANTERNE_ADDRESS = 'Place Bel-Air 6, 1400 Yverdon-les-Bains';
+
+function fetchLanterneHtml(url, timeoutMs = 20000) {
+  const maxTime = Math.max(5, Math.ceil(timeoutMs / 1000));
+  return execFileSync('curl', ['-L', '-A', 'Mozilla/5.0 (OpenClaw Kids Activities v0.2)', '--compressed', '--connect-timeout', '8', '-m', String(maxTime), '-sS', url], { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
+}
+
+// « Samedi 07 novembre 2026 11:00 » / « 04 novembre 2026 » → { date: 'YYYY-MM-DD', time: 'HH:MM' | '' }.
+// The year is mandatory (both sites print it) so a stale page can never be misdated.
+function parseLanterneDate(text = '') {
+  const t = clean(text).toLowerCase();
+  const m = t.match(new RegExp(`(\\d{1,2})\\s+(${MONTH_RE})\\.?\\s+(\\d{4})`, 'i'));
+  if (!m) return null;
+  const tm = t.slice(m.index + m[0].length).match(/(\d{1,2})\s*[:h]\s*(\d{2})/);
+  return {
+    date: `${m[3]}-${MONTHS[m[2].toLowerCase()]}-${m[1].padStart(2, '0')}`,
+    time: tm ? `${tm[1].padStart(2, '0')}:${tm[2]}` : ''
+  };
+}
+
+// Club page of La Lanterne Magique → season dates, club schedule, next film, tariff.
+function parseLanterneMagiqueClub(html) {
+  const $ = cheerio.load(html);
+  const dates = [];
+  $('li.liste_dates').each((_, el) => {
+    const d = parseLanterneDate($(el).text());
+    if (d) dates.push({ date: d.date, audioDescription: $(el).find('img.audio-description').length > 0 });
+  });
+  const header = clean($('#club_detail .rangee_titre .sur_titre_section_date').last().text());
+  const sched = header.match(/(\d{1,2}:\d{2})\s*\/\s*(\d{1,2}:\d{2})/) || header.match(/(\d{1,2}:\d{2})/);
+  const weekday = (header.match(/(lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)/i) || [])[1] || '';
+  // « Prochaine séance » heading is followed by the film title then « Mercredi 04 novembre 2026 ».
+  const heads = $('h2,h3,h4,h5').toArray().map(el => clean($(el).text()));
+  const hi = heads.findIndex(h => /^prochaine séance$/i.test(h));
+  let nextFilm = null;
+  if (hi >= 0 && heads[hi + 1] && heads[hi + 2]) {
+    const d = parseLanterneDate(heads[hi + 2]);
+    if (d) nextFilm = { title: heads[hi + 1], date: d.date };
+  }
+  const why = clean($('.why-side-nav .petits_paragraphes').first().text());
+  const infos = clean($('#collapse_infos').text());
+  const priceMatch = infos.match(/Prix\s*:\s*(.*)$/i);
+  const metaDesc = clean($('meta[name=description]').attr('content') || '');
+  const age = metaDesc.match(/(\d{1,2})\s*-\s*(\d{1,2})\s*ans/);
+  return {
+    dates,
+    startTime: sched ? sched[1] : '',
+    secondTime: sched && sched[2] ? sched[2] : '',
+    weekday,
+    nextFilm,
+    why,
+    priceText: priceMatch ? clean(priceMatch[1]) : '',
+    ageText: age ? `${age[1]}-${age[2]} ans` : '6-12 ans'
+  };
+}
+
+// Petite Lanterne cinema page → upcoming séances + tariff + doors time.
+function parsePetiteLanterne(html) {
+  const $ = cheerio.load(html);
+  const sessions = [];
+  $('article[class^="seance-"], article[class*=" seance-"]').each((_, el) => {
+    const $el = $(el);
+    const d = parseLanterneDate($el.find('date').first().text());
+    if (!d) return;
+    const theme = clean($el.find('h3').first().text()).replace(/^séance\s*/i, '');
+    const href = $el.find('h3').first().closest('a').attr('href') || $el.find('a').first().attr('href') || '';
+    sessions.push({
+      date: d.date,
+      time: d.time || '11:00',
+      theme,
+      subtitle: clean($el.find('.small-gray-text').first().text()),
+      url: href,
+      ticketUrl: $el.find('a.btn').first().attr('href') || ''
+    });
+  });
+  const text = clean($('body').text());
+  const full = text.match(/Tarif plein\s*:\s*(CHF\s*[\d.]+[–-]?)/i);
+  const reduced = text.match(/Tarif réduit\s*:\s*(CHF\s*[\d.]+[–-]?)\s*(sur présentation de la CarteCulture)?/i);
+  const doors = text.match(/Portes\s*:\s*(\d{1,2}h\d{2})/i);
+  const priceText = [full ? `Tarif plein ${full[1]}` : '', reduced ? `tarif réduit ${reduced[1]}${reduced[2] ? ' ' + reduced[2] : ''}` : ''].filter(Boolean).join(', ');
+  return { sessions, priceText, doors: doors ? doors[1] : '' };
+}
+
+function lanterneMagiqueEvents(club, today = new Date()) {
+  const todayIso = today.toISOString().slice(0, 10);
+  const total = club.dates.length;
+  const out = [];
+  club.dates.forEach((d, i) => {
+    if (d.date < todayIso) return;
+    const film = club.nextFilm && club.nextFilm.date === d.date ? club.nextFilm.title : '';
+    const title = film
+      ? `La Lanterne Magique Yverdon — « ${film} » (ciné-club enfants ${club.ageText})`
+      : `La Lanterne Magique Yverdon — séance ${i + 1}/${total} (ciné-club enfants ${club.ageText})`;
+    const url = `${SOURCES.lanterneMagique.url}#${d.date}`;
+    const horaire = club.startTime ? `${club.weekday ? club.weekday + ' ' : ''}${club.startTime}${club.secondTime ? ' / ' + club.secondTime : ''}` : '';
+    const desc = clean([
+      `Ciné-club pour enfants de ${club.ageText} au Cinéma Bel-Air (séance ${i + 1} sur ${total} de la saison).`,
+      film ? `Film : « ${film} ».` : 'Film annoncé peu avant la séance.',
+      club.why && film ? club.why : '',
+      d.audioDescription ? 'Séance avec audiodescription.' : '',
+      horaire ? `Horaire du club : ${horaire}.` : ''
+    ].filter(Boolean).join(' '));
+    out.push(normalizeEvent({
+      source: 'lanterneMagique',
+      title,
+      startDate: isoDateZurich(d.date, club.startTime),
+      endDate: null,
+      locationName: LANTERNE_VENUE,
+      locationText: `${LANTERNE_VENUE}, ${LANTERNE_ADDRESS}`,
+      city: 'Yverdon-les-Bains',
+      url,
+      description: desc,
+      ageText: club.ageText,
+      priceText: club.priceText || 'Abonnement saison CHF 40.– (8 séances)',
+      tags: ['culture', 'indoor', 'discovery'], // fixed: inferTags matches « lac » inside « Place Bel-Air »
+      sourceProvenance: `La Lanterne Magique — club d'Yverdon-les-Bains: ${SOURCES.lanterneMagique.url}`,
+      officialSources: [SOURCES.lanterneMagique.url, 'https://www.lanterne-magique.org/clubs/'],
+      evidence: clean([horaire, d.date, film, club.priceText, 'inscription: Cinéma Bel-Air 30 min avant les séances'].filter(Boolean).join(' | ')).slice(0, 1200)
+    }));
+  });
+  return out;
+}
+
+function petiteLanterneEvents(page, today = new Date()) {
+  const todayIso = today.toISOString().slice(0, 10);
+  return page.sessions.filter(s => s.date >= todayIso).map((s) => {
+    const title = `La Petite Lanterne Yverdon — Séance ${s.theme} (ciné dès 4 ans)`;
+    const url = `${s.url || SOURCES.lanterneMagique.petiteUrl}#${s.date}`;
+    const desc = clean([
+      'Petit ciné-club pour les 4-6 ans, à vivre avec ses parents ou grands-parents, au Cinéma Bel-Air (séance d\'environ 1 h de courts films).',
+      s.subtitle ? `Thème : ${s.theme} — ${s.subtitle}.` : `Thème : ${s.theme}.`,
+      page.doors ? `Ouverture des portes ${page.doors}.` : ''
+    ].filter(Boolean).join(' '));
+    return normalizeEvent({
+      source: 'lanterneMagique',
+      title,
+      startDate: isoDateZurich(s.date, s.time),
+      endDate: null,
+      locationName: LANTERNE_VENUE,
+      locationText: `${LANTERNE_VENUE}, ${LANTERNE_ADDRESS}`,
+      city: 'Yverdon-les-Bains',
+      url,
+      description: desc,
+      ageText: '4-6 ans',
+      priceText: page.priceText || 'Tarif plein CHF 10.–, réduit CHF 5.–',
+      tags: ['culture', 'indoor', 'discovery'], // fixed: inferTags matches « lac » inside « Place Bel-Air »
+      sourceProvenance: `La Petite Lanterne — Yverdon-les-Bains: ${SOURCES.lanterneMagique.petiteUrl}`,
+      officialSources: uniqBy([s.url, s.ticketUrl, SOURCES.lanterneMagique.petiteUrl].filter(Boolean), x => x),
+      evidence: clean([s.date, s.time, s.theme, s.subtitle, page.priceText, s.ticketUrl && `billets: ${s.ticketUrl}`].filter(Boolean).join(' | ')).slice(0, 1200)
+    });
+  });
+}
+
+async function scrapeLanterneMagique() {
+  const cfg = SOURCES.lanterneMagique;
+  const events = [];
+  const notes = [];
+  const errors = [];
+  try {
+    const club = parseLanterneMagiqueClub(fetchLanterneHtml(cfg.url, 20000));
+    const ev = lanterneMagiqueEvents(club);
+    events.push(...ev);
+    notes.push(`Lanterne Magique: ${club.dates.length} séances saison, ${ev.length} à venir`);
+  } catch (e) { errors.push(`Lanterne Magique: ${e.message}`); }
+  try {
+    const page = parsePetiteLanterne(fetchLanterneHtml(cfg.petiteUrl, 20000));
+    const ev = petiteLanterneEvents(page);
+    events.push(...ev);
+    notes.push(`Petite Lanterne: ${page.sessions.length} séances listées, ${ev.length} à venir`);
+  } catch (e) { errors.push(`Petite Lanterne: ${e.message}`); }
+  if (!events.length && errors.length) return [{ source: 'lanterneMagique', title: 'La Lanterne Magique / Petite Lanterne', url: cfg.url, error: errors.join(' ; ') }];
+  return { events: uniqBy(events, e => e.id), note: [...notes, ...errors].join(' ; ') };
+}
+
 function eventReviewQueueMarkdown(queue) {
   if (!queue.events.length) return '# Event review queue\n\nNo shortlisted recommendations.\n';
   return '# Event review queue — mandatory before final send\n\n'
@@ -8081,7 +8279,7 @@ async function collectAll() {
   // fast, and should remain visible even when a slow external source delays the
   // wider collection. Recommendation dedupe still prefers official web sources
   // over manual duplicates via canonicalRecommendationPool().
-  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, neuchatelStreetFood: scrapeNeuchatelStreetFood, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy, laMarive: scrapeLaMarive, vaudTourisme: scrapeVaudTourisme, terreNature: scrapeTerreNature, neuchatelVinsTerroir: scrapeNeuchatelVinsTerroir });
+  const sources = Object.entries({ manualJohan: loadManualJohanEvents, prioritizedTheatreCandidates: loadPrioritizedSourceCandidates, grandson: scrapeGrandson, yverdon: scrapeYverdon, ovv: scrapeOvv, emoi: scrapeEmoi, yverdonVille: scrapeYverdonVille, infomaniakYverdon: scrapeInfomaniakYverdon, agendaCh: scrapeAgendaCh, laDerivee: scrapeLaDerivee, orbe: scrapeOrbe, vallorbe: scrapeVallorbe, sainteCroix: scrapeSainteCroix, champvent: scrapeChampvent, echallens: scrapeEchallens, echallensTourisme: scrapeEchallensTourisme, avenches: scrapeAvenches, valleeDeJoux: scrapeValleeDeJoux, fribourgTerroir: scrapeFribourgTerroir, payerne: scrapePayerne, vullyLesLacs: scrapeVully, murtenMorat: scrapeMurtenMorat, chavornay: scrapeChavornay, laSauge: scrapeLaSauge, parcJuraVaudois: scrapeParcJuraVaudois, champPittet: scrapeChampPittet, buskers: scrapeBuskers, neuchatelStreetFood: scrapeNeuchatelStreetFood, castrum: scrapeCastrum, j3l: scrapeJ3l, grandsonChateau: scrapeGrandsonChateau, maisonAilleurs: scrapeMaisonAilleurs, latenium: scrapeLatenium, museeYverdon: scrapeMuseeYverdon, bibliothequeYverdon: scrapeBibliothequeYverdon, tempsLibre: scrapeTempsLibre, theatreDuPassage: scrapeTheatreDuPassage, lePommier: scrapeLePommier, theatreBennoBesson: scrapeTheatreBennoBesson, echandole: scrapeEchandole, leProgrammeVaudKids: scrapeLeProgrammeVaudKids, sunsetJazz: scrapeSunsetJazz, chateauLaSarraz: scrapeChateauLaSarraz, pomy: scrapePomy, chamblon: scrapeChamblon, mathod: scrapeMathod, cossonay: scrapeCossonay, fontaines: scrapeFontaines, valDeTravers: scrapeValDeTravers, vaudfamille: scrapeVaudfamille, cacy: scrapeCacy, laMarive: scrapeLaMarive, vaudTourisme: scrapeVaudTourisme, terreNature: scrapeTerreNature, neuchatelVinsTerroir: scrapeNeuchatelVinsTerroir, lanterneMagique: scrapeLanterneMagique });
 
   // Run sources with bounded concurrency so one slow/hanging source no longer
   // blocks the rest (root fix for the run overrunning the daily window — TASK-228).
@@ -9198,6 +9396,62 @@ async function runFixtureTests() {
   assert.strictEqual(alc('Accords diVins – Vins & Fromages', 'Le domaine fête ses 20 ans.'), true, 'a « fête » in a tasting description does not exempt it (title-only happening cue)');
   assert.strictEqual(alc('Dégustation de l’Œil de Perdrix'), true);
   assert.strictEqual(alc('Caves Ouvertes neuchâteloises 2027', 'Une quarantaine de domaines.'), false, 'caves ouvertes are a Johan taste signal, not a rejection');
+
+  // --- La Lanterne Magique / La Petite Lanterne (TASK-204, Johan 2026-10-28) ---
+  assert.deepStrictEqual(parseLanterneDate('Samedi\n 07\n novembre\n 2026 11:00'), { date: '2026-11-07', time: '11:00' }, 'Lanterne parses a multi-line Petite Lanterne <date>');
+  assert.deepStrictEqual(parseLanterneDate('10 mars 2027 '), { date: '2027-03-10', time: '' }, 'Lanterne parses a bare club date (nbsp tolerated)');
+  assert.strictEqual(parseLanterneDate('mercredi 13:30'), null, 'Lanterne refuses a date without day+month+year');
+  const lanterneClubHtml = `<html><head><meta name="description" content="Le club de cinéma des 6-12 ans"></head><body>
+    <main><div id="club_detail"><div class="rangee_titre"><h2>Yverdon-les-Bains</h2>
+      <div class="sur_titre_section_date">mercredi : 13:30/15:30 <br>Cinéma Bel-Air<br>Place Bel-Air 6</div></div>
+      <ol><li class="liste_dates">04 novembre 2026</li><li class="liste_dates">02 décembre 2026</li></ol>
+      <ol><li class="liste_dates">10 mars 2027&nbsp;<img class="audio-description blanc" alt="audio description" src="x.png"></li></ol>
+      <div id="collapse_infos"><p>Cinéma Bel-Air, 30 minutes avant les séances</p><p>Prix: CHF 40.– pour les 8 séances de la saison (CHF 30.– pour le 2e enfant)</p></div>
+    </div>
+    <div class="why-side-nav"><p class="petits_paragraphes">Adaptation réussie d’un livre de Roald Dahl.</p></div>
+    <h3>Prochaine séance</h3><h2> Matilda </h2><h3>Mercredi 04 novembre 2026</h3></main></body></html>`;
+  const lanterneClub = parseLanterneMagiqueClub(lanterneClubHtml);
+  assert.deepStrictEqual(lanterneClub.dates.map(d => d.date), ['2026-11-04', '2026-12-02', '2027-03-10'], 'Lanterne club lists every season date');
+  assert.deepStrictEqual(lanterneClub.dates.map(d => d.audioDescription), [false, false, true], 'Lanterne flags the audio-description séance');
+  assert.deepStrictEqual([lanterneClub.startTime, lanterneClub.secondTime, lanterneClub.weekday, lanterneClub.ageText], ['13:30', '15:30', 'mercredi', '6-12 ans'], 'Lanterne club schedule + age');
+  assert.deepStrictEqual(lanterneClub.nextFilm, { title: 'Matilda', date: '2026-11-04' }, 'Lanterne reads the next film under « Prochaine séance »');
+  assert.ok(/^CHF 40\.– pour les 8 séances/.test(lanterneClub.priceText), 'Lanterne reads the season tariff');
+  const lanterneToday = new Date('2026-11-02T00:00:00Z');
+  const lanterneEvents = lanterneMagiqueEvents(lanterneClub, lanterneToday);
+  assert.strictEqual(lanterneEvents.length, 3);
+  assert.strictEqual(lanterneEvents[0].startDate, '2026-11-04T13:30:00+01:00', 'Lanterne séance gets the DST-aware club start');
+  assert.strictEqual(lanterneEvents[2].startDate, '2027-03-10T13:30:00+01:00');
+  assert.ok(/« Matilda »/.test(lanterneEvents[0].title) && /séance 2\/3/.test(lanterneEvents[1].title), 'Lanterne titles: film when announced, numbered otherwise');
+  assert.deepStrictEqual([lanterneEvents[0].ageMin, lanterneEvents[0].ageMax, lanterneEvents[0].city], [6, 12, 'Yverdon-les-Bains']);
+  assert.ok(/audiodescription/.test(lanterneEvents[2].description), 'Lanterne mentions the audio-description séance');
+  assert.strictEqual(lanterneEvents[0].url, 'https://www.lanterne-magique.org/clubs/yverdon-les-bains/#2026-11-04', 'Lanterne keeps a stable per-date URL');
+  assert.strictEqual(estimateDistanceKm(lanterneEvents[0]), 0, 'Lanterne resolves to 0 km (Yverdon-les-Bains)');
+  assert.deepStrictEqual(lanterneEvents[0].tags, ['culture', 'indoor', 'discovery'], 'Lanterne tags are fixed (no « lac » match inside « Place »)');
+  assert.strictEqual(lanterneMagiqueEvents(lanterneClub, new Date('2026-12-03T00:00:00Z')).length, 1, 'Lanterne drops séances already past');
+  const petiteHtml = `<html><body><p>Prix <b>Tarif plein:</b> CHF 10.– <b>Tarif réduit:</b> CHF 5.– sur présentation de la CarteCulture</p>
+    <p><b>Portes:</b> 10h30 <b>Séance:</b> 11h00</p>
+    <article class="seance-3528"><a href="https://www.petitelanterne.org/seances/emotions/"><img alt="Émotions"></a>
+      <date>Samedi
+        07
+        novembre
+        2026 11:00
+      </date><a href="https://www.petitelanterne.org/seances/emotions/"><h3>Séance
+        Émotions</h3></a><p class="small-gray-text">Des émotions sur grand écran</p>
+      <a id="btn-form-ins-8431" class="btn" href="https://tickets.petitelanterne.org/checkout?club=40&session=127729">Billets</a></article>
+    <article class="seance-3534"><date>Samedi 30 janvier 2027 11:00</date><a href="https://www.petitelanterne.org/seances/difference/"><h3>Séance Différence</h3></a></article></body></html>`;
+  const petite = parsePetiteLanterne(petiteHtml);
+  assert.strictEqual(petite.sessions.length, 2, 'Petite Lanterne lists every projection');
+  assert.deepStrictEqual([petite.sessions[0].date, petite.sessions[0].time, petite.sessions[0].theme, petite.sessions[0].subtitle], ['2026-11-07', '11:00', 'Émotions', 'Des émotions sur grand écran'], 'Petite Lanterne séance fields');
+  assert.ok(/session=127729/.test(petite.sessions[0].ticketUrl), 'Petite Lanterne keeps the ticket link');
+  assert.strictEqual(petite.doors, '10h30');
+  assert.strictEqual(petite.priceText, 'Tarif plein CHF 10.–, tarif réduit CHF 5.– sur présentation de la CarteCulture', 'Petite Lanterne tariff');
+  const petiteEvents = petiteLanterneEvents(petite, lanterneToday);
+  assert.strictEqual(petiteEvents.length, 2);
+  assert.strictEqual(petiteEvents[0].startDate, '2026-11-07T11:00:00+01:00');
+  assert.deepStrictEqual([petiteEvents[0].ageMin, petiteEvents[0].ageMax], [4, 6], 'Petite Lanterne targets 4-6 ans');
+  assert.strictEqual(petiteEvents[0].url, 'https://www.petitelanterne.org/seances/emotions/#2026-11-07');
+  assert.ok(/portes 10h30/i.test(petiteEvents[0].description), 'Petite Lanterne carries the doors time');
+  assert.notStrictEqual(petiteEvents[0].id, petiteEvents[1].id, 'Petite Lanterne ids are per occurrence');
   assert.strictEqual(alc('Marché de Noël à Estavayer-le-Lac', 'Vin et produits artisanaux.'), false, 'Unicode boundary: « Marché » is recognised despite the trailing é');
   assert.strictEqual(alc('Marché du terroir', 'Dégustation de vins, activités pour petits et grands.'), false, 'an explicit family cue exempts a terroir market');
   assert.strictEqual(alc('Descente aux flambeaux', 'vin chaud et soupe offerts'), false, 'vin chaud at a buvette is not adult-focused');
@@ -9939,4 +10193,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, isFridayEveningEvent, windowFriday, nextWeekendWindow, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, parseSainteCroixDateTime, sainteCroixFallbackEvent, iwebRangeUrl, fetchDetailsBatched, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, fetchEchallensTourismeDetails, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, ovvInferYear, ovvCityFromAddress, ovvEventId, extractOvvListings, ovvUtcToZurichIso, parseOvvDetail, ovvPrice, ovvEventFromListing, scrapeOvv, parseBuskersEditions, scrapeBuskers, parseNeuchatelStreetFoodInfo, scrapeNeuchatelStreetFood, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive, vaudTourismeMapIndex, parseVaudEventCards, collapseDateRuns, vaudTourismeCity, vaudTourismeEventsFromGroup, scrapeVaudTourisme, parseTerreNatureDateRange, terreNatureLocation, terreNatureWithinScope, terreNaturePractical, extractTerreNatureDetailFields, terreNatureEventFromDetail, scrapeTerreNature, isAdultAlcoholFocused, parseNeuchatelVinsTerroirDate, neuchatelVinsTerroirPlace, neuchatelVinsTerroirPractical, extractNeuchatelVinsTerroirCards, neuchatelVinsTerroirEventFromCard, scrapeNeuchatelVinsTerroir };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, isFridayEveningEvent, windowFriday, nextWeekendWindow, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, parseSainteCroixDateTime, sainteCroixFallbackEvent, iwebRangeUrl, fetchDetailsBatched, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, fetchEchallensTourismeDetails, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, ovvInferYear, ovvCityFromAddress, ovvEventId, extractOvvListings, ovvUtcToZurichIso, parseOvvDetail, ovvPrice, ovvEventFromListing, scrapeOvv, parseBuskersEditions, scrapeBuskers, parseNeuchatelStreetFoodInfo, scrapeNeuchatelStreetFood, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive, vaudTourismeMapIndex, parseVaudEventCards, collapseDateRuns, vaudTourismeCity, vaudTourismeEventsFromGroup, scrapeVaudTourisme, parseTerreNatureDateRange, terreNatureLocation, terreNatureWithinScope, terreNaturePractical, extractTerreNatureDetailFields, terreNatureEventFromDetail, scrapeTerreNature, isAdultAlcoholFocused, parseNeuchatelVinsTerroirDate, neuchatelVinsTerroirPlace, neuchatelVinsTerroirPractical, extractNeuchatelVinsTerroirCards, neuchatelVinsTerroirEventFromCard, scrapeNeuchatelVinsTerroir, parseLanterneDate, parseLanterneMagiqueClub, parsePetiteLanterne, lanterneMagiqueEvents, petiteLanterneEvents, scrapeLanterneMagique };
