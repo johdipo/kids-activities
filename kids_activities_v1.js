@@ -273,7 +273,8 @@ const SOURCES = {
     kind: 'geocity-communal-agenda'
   },
   vallorbe: {
-    url: 'https://www.vallorbe.ch/agenda?datumVon=11.06.2026&datumBis=21.06.2027',
+    // Fenêtre datumVon/datumBis glissante recalculée à chaque run (voir `iwebRangeUrl`) : l'URL figée expirait.
+    url: 'https://www.vallorbe.ch/agenda',
     kind: 'iweb-communal-agenda'
   },
   sainteCroix: {
@@ -1952,61 +1953,114 @@ function extractVallorbeListings(html) {
 }
 
 function parseVallorbeDateTime(text, fallbackDate) {
-  const date = parseFrenchDate(text, 2026) || parseNumericDate(text, 2026) || fallbackDate;
-  return isoDate(date, text);
+  const fallbackYear = Number((fallbackDate || '').slice(0, 4)) || new Date().getFullYear();
+  const date = parseFrenchDate(text, fallbackYear) || parseNumericDate(text, fallbackYear) || (fallbackDate || '').slice(0, 10);
+  return isoDateZurich(date, text);
+}
+
+// Heure de fin « 18h30 - 19h30 » → ISO pour un événement d'un seul jour (null sinon).
+function parseVallorbeEndTime(dateLine, startIso, fallbackEnd) {
+  const m = clean(dateLine).match(/\d{1,2}h\d{0,2}\s*-\s*(\d{1,2})h(\d{0,2})/i);
+  const day = (startIso || '').slice(0, 10);
+  if (!m || !day || (fallbackEnd && fallbackEnd.slice(0, 10) !== day)) return fallbackEnd || null;
+  return isoDateZurich(day, `${m[1]}h${m[2] || '00'}`);
+}
+
+// Fiche I-Web : `.icms-lead-container` = lieu (lignes <br>) puis ligne de date ; `.icms-text-container` = description ;
+// `.icms-desclist-container dl` = Conditions/Prix ; `.icms-contact-container` = contact. Le texte <main> brut
+// embarque menu/pied de page (« Activités en plein air », « Refuges ») qui polluait tags et preuves.
+function parseVallorbeStructured($) {
+  const root = $('.maincontent').first();
+  if (!root.length) return null;
+  const leadEl = root.find('.icms-lead-container').first();
+  if (!leadEl.length) return null;
+  leadEl.find('br').replaceWith('\n');
+  const leadLines = leadEl.text().split('\n').map(clean).filter(Boolean);
+  const dateRe = new RegExp(`\\d{1,2}\\s+(?:${MONTH_RE})\\.?\\s+\\d{4}`, 'i');
+  const dateIdx = leadLines.findIndex(l => dateRe.test(l));
+  const dateLine = dateIdx >= 0 ? leadLines[dateIdx] : '';
+  const placeLines = dateIdx >= 0 ? leadLines.slice(0, dateIdx) : leadLines;
+  const descEl = root.find('.icms-text-container .icms-wysiwyg').first();
+  descEl.find('br').replaceWith(' ');
+  const desc = clean(descEl.text());
+  const fields = {};
+  root.find('.icms-desclist-container dl').each((_, dl) => {
+    $(dl).find('dt').each((__, dt) => { fields[clean($(dt).text()).toLowerCase()] = clean($(dt).next('dd').text()); });
+  });
+  const contactEl = root.find('.icms-contact-container').first();
+  contactEl.find('br').replaceWith(' | ');
+  contactEl.find('a.icms-link-ext').remove();
+  const contact = clean(contactEl.text()).replace(/(\|\s*)+$/, '').replace(/\s*\|\s*(\|\s*)+/g, ' | ');
+  return { dateLine, placeLines, desc, fields, contact };
+}
+
+// Bloc « Conditions » : « Gratuit, pour les enfants dès 5 ans et familles, entrée libre ».
+function parseVallorbeConditions(cond = '') {
+  const t = clean(cond);
+  if (!t) return { priceText: '', ageText: '' };
+  const free = t.match(/gratuit[^,.;]*|entr[ée]e libre/i);
+  const chf = t.match(/(?:CHF|Fr\.?)\s*\d+[^,;]*/i);
+  const ageClause = clean(t.replace(/^gratuit\s*,?\s*/i, '').replace(/,?\s*entr[ée]e libre\s*$/i, ''));
+  const ageText = /enfants?|familles?|ados?|adolescents?|\bd[èe]s\s+\d+\s*ans/i.test(ageClause) ? ageClause : '';
+  return { priceText: clean((free || chf || [''])[0]), ageText };
 }
 
 function parseVallorbeDetail(html, fallback = {}) {
   const $ = cheerio.load(html);
+  const structured = parseVallorbeStructured($);
   let title = clean($('main h1.contentTitle, main h1').first().text()) || fallback.title;
   if (!title || /^(Contact|Connexion|Rechercher)$/i.test(title)) title = fallback.title;
-  const mainText = bestDetailText($, title) || clean($('main').first().text()) || clean($('body').text());
-  const dateLineRe = new RegExp(`\\d{1,2}\\s+(?:${MONTH_RE})\\.?\\s+\\d{4}(?:,?\\s*\\d{1,2}h\\d{0,2}(?:\\s*-\\s*\\d{1,2}h\\d{0,2})?)?`, 'i');
-  const dateLine = (mainText.match(dateLineRe) || [])[0] || '';
-  const location = extractAfter('Lieu', mainText, ['Contact', 'Organisateur', 'Organisation', 'Prix', 'Retour']) || fallback.locationText || 'Vallorbe';
-  const contact = extractAfter('Contact', mainText, ['Organisateur', 'Organisation', 'Prix', 'Retour']);
-  const organizer = fallback.organizer || extractAfter('Organisateur', mainText, ['Lieu', 'Contact', 'Prix', 'Retour']) || extractAfter('Organisation', mainText, ['Lieu', 'Contact', 'Prix', 'Retour']);
-  const price = extractAfter('Prix', mainText, ['Contact', 'Organisateur', 'Organisation', 'Retour']);
-  const description = clean(mainText
-    .replace(/^.*?Agenda\(sélectionné\)/, '')
-    .replace(title, '')
-    .replace(dateLine, '')
-    .replace(/Lieu.*$/i, '')
-  );
-  const evidence = clean([title, dateLine || fallback.startDate, location, organizer, contact, price, description].filter(Boolean).join(' | '));
+  let dateLine = '', location = '', description = '', contact = '', priceField = '', conditionsText = '';
+  if (structured) {
+    ({ dateLine, contact } = structured);
+    location = structured.placeLines.join(', ');
+    description = structured.desc;
+    priceField = structured.fields.prix || structured.fields.tarif || structured.fields.tarifs || '';
+    conditionsText = structured.fields.conditions || '';
+  } else {
+    // Repli texte brut (structure I-Web inattendue).
+    const mainText = bestDetailText($, title) || clean($('main').first().text()) || clean($('body').text());
+    const dateLineRe = new RegExp(`\\d{1,2}\\s+(?:${MONTH_RE})\\.?\\s+\\d{4}(?:,?\\s*\\d{1,2}h\\d{0,2}(?:\\s*-\\s*\\d{1,2}h\\d{0,2})?)?`, 'i');
+    dateLine = (mainText.match(dateLineRe) || [])[0] || '';
+    location = extractAfter('Lieu', mainText, ['Contact', 'Organisateur', 'Organisation', 'Prix', 'Retour']);
+    contact = extractAfter('Contact', mainText, ['Organisateur', 'Organisation', 'Prix', 'Retour']);
+    priceField = extractAfter('Prix', mainText, ['Contact', 'Organisateur', 'Organisation', 'Retour']);
+  }
+  location = location || fallback.locationText || 'Vallorbe';
+  const organizer = fallback.organizer || '';
+  const conditions = parseVallorbeConditions(conditionsText);
+  const price = priceField || conditions.priceText || (/entr[ée]e libre|gratuit/i.test(description) ? (description.match(/entr[ée]e libre|gratuit[e]?/i) || [''])[0] : '');
+  const evidence = clean([title, dateLine || fallback.startDate, location, organizer, contact, price, conditions.ageText, description].filter(Boolean).join(' | '));
+  const startDate = parseVallorbeDateTime(dateLine, fallback.startDate);
   return normalizeEvent({
     source: 'vallorbe',
     title,
-    startDate: parseVallorbeDateTime(dateLine, fallback.startDate),
-    endDate: fallback.endDate || null,
+    startDate,
+    endDate: parseVallorbeEndTime(dateLine, startDate, fallback.endDate),
     locationName: location.split(/Place|Rue|Route|\d{4}/)[0],
     locationText: location,
     city: cityFromLocation(location, fallback.city || 'Vallorbe'),
     url: fallback.url || vallorbeEventUrl(fallback.id),
     description: description || organizer || title,
     priceText: price,
-    ageText: /familles?|enfants?|jeunesse|tout public|jeux|atelier|biblioth/i.test(evidence) ? 'famille / enfants mentionnés' : '',
+    ageText: conditions.ageText || (/familles?|enfants?|jeunesse|tout public|jeux|atelier|biblioth/i.test(evidence) ? 'famille / enfants mentionnés' : ''),
     evidence
   });
 }
 
+function vallorbeFallbackEvent(item) {
+  return normalizeEvent({
+    source: 'vallorbe', title: item.title, startDate: item.startDate, endDate: item.endDate,
+    locationText: item.locationText, city: item.city, url: item.url, description: item.organizer,
+    evidence: clean([item.title, item.startDate, item.endDate, item.locationText, item.organizer].filter(Boolean).join(' | '))
+  });
+}
+
 async function scrapeVallorbe() {
-  const html = await fetchHtml(SOURCES.vallorbe.url, 30000);
+  const html = await fetchHtml(iwebRangeUrl(SOURCES.vallorbe.url), 30000);
   const listings = extractVallorbeListings(html);
-  const events = [];
-  for (const item of listings) {
-    try {
-      const detailHtml = await fetchHtml(item.url, 25000);
-      events.push(parseVallorbeDetail(detailHtml, item));
-    } catch (e) {
-      events.push(normalizeEvent({
-        source: 'vallorbe', title: item.title, startDate: item.startDate, endDate: item.endDate,
-        locationText: item.locationText, city: item.city, url: item.url, description: item.organizer,
-        evidence: clean([item.title, item.startDate, item.endDate, item.locationText, item.organizer].filter(Boolean).join(' | '))
-      }));
-    }
-  }
-  return events;
+  const events = await fetchDetailsBatched(listings, { parse: parseVallorbeDetail, fallback: vallorbeFallbackEvent, label: 'vallorbe' });
+  return uniqBy(events.filter(e => e.title && e.startDate && e.url), e => e.id);
 }
 
 
@@ -8377,6 +8431,23 @@ async function runFixtureTests() {
   assert.strictEqual(vallorbeEvent.source, 'vallorbe');
   assert.strictEqual(vallorbeEvent.startDate, '2026-08-31T18:30:00+02:00');
   assert.strictEqual(vallorbeEvent.city, 'Vallorbe');
+  // Fiche I-Web structurée (lead + wysiwyg + Conditions) : heure d'hiver +01:00, fin, prix, âge, pas de pollution menu.
+  const vallorbeStructured = `<main><h1 class="contentTitle">Contes joyeux en musique</h1><nav>Activités en plein air Refuges &amp; cabanes</nav><div class="maincontent"><div class="icms-lead-container">Bibliothèque de Vallorbe<br>Grand-Rue 24<br>1337 Vallorbe<br>11 nov. 2026, 18h30 - 19h30</div><div class="icms-text-container"><div class="icms-wysiwyg">Spectacle avec la compagnie Contes Joyeux</div></div><address class="icms-contact-container">Bibliothèque <br>Marie Ruchonnet<br><a href="mailto:b@vallorbe.ch" class="icms-link-contact-block">b@vallorbe.ch</a><br><a class="icms-link-ext">Site web</a></address><div class="icms-desclist-container"><dl><dt>Conditions</dt><dd><div class="icms-wysiwyg">Gratuit, pour les enfants d&egrave;s 5 ans et familles, entr&eacute;e libre</div></dd></dl></div></div></main>`;
+  const vallorbeWinter = parseVallorbeDetail(vallorbeStructured, { id: '7725760', title: 'Contes joyeux en musique', startDate: '2026-11-11', endDate: '2026-11-11', city: 'Vallorbe', url: 'https://www.vallorbe.ch/_rte/anlass/7725760' });
+  assert.strictEqual(vallorbeWinter.startDate, '2026-11-11T18:30:00+01:00');
+  assert.strictEqual(vallorbeWinter.endDate, '2026-11-11T19:30:00+01:00');
+  assert.strictEqual(vallorbeWinter.priceText, 'Gratuit');
+  assert.strictEqual(vallorbeWinter.ageText, 'pour les enfants dès 5 ans et familles');
+  assert.ok(/Grand-Rue 24/.test(vallorbeWinter.locationText));
+  assert.ok(!/plein air|Refuges|Site web/.test(vallorbeWinter.evidence), 'menu/lien externe ne doit pas polluer la preuve');
+  const vallorbeMulti = parseVallorbeDetail(`<main><div class="maincontent"><div class="icms-lead-container">Juraparc SA<br>Route de la Vallée 3<br>1337 Vallorbe<br>28 nov. 2026 - 29 nov. 2026</div><div class="icms-text-container"><div class="icms-wysiwyg">Marché. Entr&eacute;e libre!</div></div></div></main>`, { id: '1', title: 'Comptoir de Noël 2026', startDate: '2026-11-28', endDate: '2026-11-29', city: 'Vallorbe', url: 'https://www.vallorbe.ch/_rte/anlass/1' });
+  assert.strictEqual(vallorbeMulti.startDate, '2026-11-28');
+  assert.strictEqual(vallorbeMulti.endDate, '2026-11-29');
+  assert.ok(/entr[ée]e libre/i.test(vallorbeMulti.priceText));
+  assert.strictEqual(parseVallorbeDateTime('11 nov. 2026, 18h30', '2026-11-11'), '2026-11-11T18:30:00+01:00');
+  assert.strictEqual(parseVallorbeDateTime('', '2027-07-05'), '2027-07-05');
+  assert.strictEqual(parseVallorbeEndTime('18h30 - 19h30', '2027-07-05T18:30:00+02:00', '2027-07-06'), '2027-07-06', 'multi-jour : garder la fin du listing');
+  assert.strictEqual(vallorbeFallbackEvent({ title: 'X', startDate: '2026-11-11', url: 'https://www.vallorbe.ch/_rte/anlass/2', city: 'Vallorbe' }).source, 'vallorbe');
   const sainteEntities = JSON.stringify({ data: [{ id: '6986620', name: '<a href="/_rte/anlass/6986620">Cinéma Royal - Journée des Réfugié.es</a>', lokalitaet: 'Cinéma Royal', datumVon: '1781906400000', datumBis: '1781906400000', organisator: 'Cinéma Royal', hauptkategorieId: '<svg class="cms-icon cms-icon-art"></svg>' }] }).replace(/"/g, '&quot;');
   const sainteRows = extractSainteCroixListings(`<table id="anlassList" data-entities="${sainteEntities}"></table>`);
   assert.strictEqual(sainteRows.length, 1);
@@ -10193,4 +10264,4 @@ if (require.main === module) {
   main().catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, isFridayEveningEvent, windowFriday, nextWeekendWindow, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, parseSainteCroixDateTime, sainteCroixFallbackEvent, iwebRangeUrl, fetchDetailsBatched, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, fetchEchallensTourismeDetails, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, ovvInferYear, ovvCityFromAddress, ovvEventId, extractOvvListings, ovvUtcToZurichIso, parseOvvDetail, ovvPrice, ovvEventFromListing, scrapeOvv, parseBuskersEditions, scrapeBuskers, parseNeuchatelStreetFoodInfo, scrapeNeuchatelStreetFood, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive, vaudTourismeMapIndex, parseVaudEventCards, collapseDateRuns, vaudTourismeCity, vaudTourismeEventsFromGroup, scrapeVaudTourisme, parseTerreNatureDateRange, terreNatureLocation, terreNatureWithinScope, terreNaturePractical, extractTerreNatureDetailFields, terreNatureEventFromDetail, scrapeTerreNature, isAdultAlcoholFocused, parseNeuchatelVinsTerroirDate, neuchatelVinsTerroirPlace, neuchatelVinsTerroirPractical, extractNeuchatelVinsTerroirCards, neuchatelVinsTerroirEventFromCard, scrapeNeuchatelVinsTerroir, parseLanterneDate, parseLanterneMagiqueClub, parsePetiteLanterne, lanterneMagiqueEvents, petiteLanterneEvents, scrapeLanterneMagique };
+module.exports = { parseFrenchDate, parseInfomaniakDateRange, normalizeEvent, rejectionReason, scoreEvent, scoreEventStage1, listingView, isDataPoor, isEnrichableUrl, extractDetailFields, mergeEnrichment, selectPromising, enrichPromisingCandidates, TWO_STAGE_CONFIG, telegramSummary, eventReviewQueue, shortlistedRecommendations, isEvergreenEvent, isFridayEveningEvent, windowFriday, nextWeekendWindow, DIGEST_SIZE, TASTE_CONFIG, eventSignature, tasteSignals, applyTasteCuration, loadShownState, shownSignaturesWithin, recordShownEvents, loadTasteFeedback, feedbackAdjustment, SHOWN_STATE_FILE, TASTE_FEEDBACK_FILE, canonicalRecommendationPool, loadManualJohanEvents, loadPrioritizedSourceCandidates, extractGrandsonCalendarOccurrences, parseGrandsonDetail, scrapeGrandson, scrapeYverdon, buildGeocityEvent, parseEmoiEvent, scrapeEmoi, yverdonVilleEventUrl, scrapeYverdonVille, scrapeInfomaniakYverdon, extractAgendaChProfiles, scrapeAgendaCh, extractLaDeriveeApiToken, parseLaDeriveeEvent, scrapeLaDerivee, parseOrbeEvent, scrapeOrbe, extractVallorbeListings, parseVallorbeDetail, parseVallorbeConditions, parseVallorbeStructured, vallorbeFallbackEvent, parseVallorbeEndTime, parseVallorbeDateTime, scrapeVallorbe, extractSainteCroixListings, parseSainteCroixDetail, parseSainteCroixDateTime, sainteCroixFallbackEvent, iwebRangeUrl, fetchDetailsBatched, scrapeSainteCroix, parseChampventDateRanges, extractChampventNewsListings, extractChampventManifestationRows, parseChampventNewsDetail, scrapeChampvent, extractEchallensListings, parseEchallensDetail, scrapeEchallens, extractEchallensTourismeListings, parseEchallensTourismeDetail, fetchEchallensTourismeDetails, scrapeEchallensTourisme, extractTempsLibreListings, parseTempsLibreDetail, scrapeTempsLibre, extractTheatreDuPassageFamilyListings, parseTheatreDuPassageDetail, scrapeTheatreDuPassage, extractTheatreBennoBessonListings, scrapeTheatreBennoBesson, parseEchandoleDateText, extractEchandoleListings, parseEchandoleDetail, scrapeEchandole, extractLeProgrammeVaudListings, parseLeProgrammeVaudDetail, scrapeLeProgrammeVaudKids, extractNeuchatelVilleListings, parseNeuchatelVilleDetail, scrapeNeuchatelVille, extractLePommierListings, parseLePommierDetail, scrapeLePommier, avenchesDateToIso, parseAvenchesEvent, scrapeAvenches, parseValleeDeJouxEvent, scrapeValleeDeJoux, parseFribourgHoraire, fribourgCity, parseFribourgDetail, scrapeFribourgTerroir, parsePayerneDateSentence, extractPayerneCards, scrapePayerne, parseVullyListingDate, extractVullyListings, assignVullyYears, scrapeVully, murtenMoratEventUrl, parseMurtenDetailTime, extractMurtenListings, parseMurtenDetail, scrapeMurtenMorat, chavornayEventUrl, parseChavornayDetailTime, extractChavornayListings, parseChavornayDetail, scrapeChavornay, parseLaSaugeDateLine, extractLaSaugeListings, assignLaSaugeYears, scrapeLaSauge, parseParcJuraVaudoisDate, parseParcJuraVaudoisTime, extractParcJuraVaudoisListings, assignParcJuraVaudoisYears, parseParcJuraVaudoisDetail, scrapeParcJuraVaudois, champPittetIsoDate, extractChampPittetListings, parseChampPittetDetail, scrapeChampPittet, ovvInferYear, ovvCityFromAddress, ovvEventId, extractOvvListings, ovvUtcToZurichIso, parseOvvDetail, ovvPrice, ovvEventFromListing, scrapeOvv, parseBuskersEditions, scrapeBuskers, parseNeuchatelStreetFoodInfo, scrapeNeuchatelStreetFood, castrumUtcToZurichIso, extractCastrumListings, castrumEventFromRow, scrapeCastrum, parseMaisonAilleursSlugDate, maisonAilleursLead, maisonAilleursTime, maisonAilleursAgeText, maisonAilleursPrice, maisonAilleursEventFromRecord, scrapeMaisonAilleurs, lateniumLead, lateniumTime, lateniumPrice, lateniumAgeText, lateniumEventFromRecord, scrapeLatenium, haversineKm, extractJ3lFeatures, j3lScopedRows, j3lIsoDate, j3lEventFromRow, scrapeJ3l, parseGrandsonChateauDates, parseGrandsonChateauTime, extractGrandsonChateauListings, parseGrandsonChateauDetail, grandsonChateauEventsFromListing, scrapeGrandsonChateau, parseMuseeYverdonDate, extractMuseeYverdonListings, parseMuseeYverdonDetail, museeYverdonEventsFromListing, scrapeMuseeYverdon, parseBibliothequeYverdonTitleDate, extractBibliothequeYverdonListings, parseBibliothequeYverdonDetail, bibliothequeYverdonEventFromListing, scrapeBibliothequeYverdon, extractSunsetJazzDays, sunsetJazzEventFromDay, scrapeSunsetJazz, laSarrazDayFromDetails, laSarrazPrice, parseLaSarrazEvent, scrapeChateauLaSarraz, parsePomyEvent, scrapePomy, parseChamblonEvent, scrapeChamblon, parseMathodEvent, scrapeMathod, extractCossonayListings, cossonaySummaryTimes, parseJEventsDetail, parseCossonayDetail, scrapeCossonay, scrapeJEventsCommune, parseFontainesDetail, scrapeFontaines, parseEventonJsonLdDate, valDeTraversCity, extractValDeTraversListings, valDeTraversEventFromRow, fetchValDeTraversTypes, scrapeValDeTravers, vaudfamilleDateParam, parseVaudfamilleLastPage, extractVaudfamilleListings, vaudfamilleEventFromListing, scrapeVaudfamille, cacyInferYear, parseCacyDateLine, extractCacyListings, parseCacyDetail, cacyEventFromListing, scrapeCacy, laMariveDateToIso, extractLaMariveListings, parseLaMariveDetail, laMariveEventFromListing, scrapeLaMarive, vaudTourismeMapIndex, parseVaudEventCards, collapseDateRuns, vaudTourismeCity, vaudTourismeEventsFromGroup, scrapeVaudTourisme, parseTerreNatureDateRange, terreNatureLocation, terreNatureWithinScope, terreNaturePractical, extractTerreNatureDetailFields, terreNatureEventFromDetail, scrapeTerreNature, isAdultAlcoholFocused, parseNeuchatelVinsTerroirDate, neuchatelVinsTerroirPlace, neuchatelVinsTerroirPractical, extractNeuchatelVinsTerroirCards, neuchatelVinsTerroirEventFromCard, scrapeNeuchatelVinsTerroir, parseLanterneDate, parseLanterneMagiqueClub, parsePetiteLanterne, lanterneMagiqueEvents, petiteLanterneEvents, scrapeLanterneMagique };
